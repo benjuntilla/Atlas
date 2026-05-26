@@ -1,0 +1,76 @@
+# Kafka topic definitions for Atlas.
+#
+# These manifests target the Strimzi operator's KafkaTopic CRD. If running
+# self-managed Kafka on GKE under Strimzi, kubectl apply this file. If using
+# Confluent Cloud, create the same topics through the Confluent CLI / UI
+# with matching names, partition counts, and replication factors.
+#
+# Producer/consumer contract per topic is documented in proto/events.proto.
+#
+# Dev:  replicas = 1 (single broker in docker-compose, no replication possible)
+# Prod: replicas = 3 (override via Kustomize overlay)
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: atlas.location.updates
+  labels:
+    strimzi.io/cluster: atlas-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 86400000        # 24h — locations are ephemeral
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: atlas.fare.events
+  labels:
+    strimzi.io/cluster: atlas-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 2592000000      # 30d — fare audit window
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: atlas.auth.tokens
+  labels:
+    strimzi.io/cluster: atlas-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 3600000         # 1h — only needed long enough to fan out cache invalidation
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: atlas.safety.alerts
+  labels:
+    strimzi.io/cluster: atlas-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 604800000       # 7d — safety alerts kept for incident review
+    cleanup.policy: delete
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: atlas.elo.recompute
+  labels:
+    strimzi.io/cluster: atlas-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: 86400000        # 24h
+    cleanup.policy: delete

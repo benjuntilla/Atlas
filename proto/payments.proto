@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package atlas.payments;
+
+service PaymentsService {
+  rpc InitiateTransaction(TransactionRequest) returns (TransactionResponse);
+  rpc SettleTransaction(SettleRequest) returns (SettleResponse);
+  rpc GetWalletBalance(WalletRequest) returns (WalletResponse);
+  rpc RefundTransaction(RefundRequest) returns (RefundResponse);
+}
+
+message TransactionRequest {
+  string from_user_id   = 1;
+  string to_user_id     = 2;
+  int64  amount_cents   = 3;
+  string idempotency_key = 4;
+  string ride_id        = 5;
+}
+
+message TransactionResponse {
+  string transaction_id = 1;
+  string status = 2;
+}
+
+message SettleRequest  { string transaction_id = 1; }
+message SettleResponse { bool success = 1; string status = 2; }
+
+message WalletRequest  { string user_id = 1; }
+message WalletResponse { int64 balance_cents = 1; string currency = 2; }
+
+message RefundRequest  { string transaction_id = 1; }
+message RefundResponse { bool success = 1; }

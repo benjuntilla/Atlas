@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package atlas.haggle;
+
+service HaggleService {
+  rpc CreateRide(CreateRideRequest) returns (RideResponse);
+  rpc SubmitBid(BidRequest) returns (BidResponse);
+  rpc AcceptBid(AcceptBidRequest) returns (RideResponse);
+  rpc GetRideStatus(RideStatusRequest) returns (RideResponse);
+}
+
+message CreateRideRequest {
+  string rider_id = 1;
+  double pickup_lat = 2;
+  double pickup_lng = 3;
+  double dropoff_lat = 4;
+  double dropoff_lng = 5;
+}
+
+message BidRequest {
+  string ride_id = 1;
+  string bidder_id = 2;
+  string role = 3;
+  int64  amount_cents = 4;
+}
+
+message AcceptBidRequest {
+  string ride_id = 1;
+  string bid_id = 2;
+}
+
+message RideStatusRequest { string ride_id = 1; }
+
+message BidResponse { string bid_id = 1; bool accepted = 2; }
+
+message RideResponse {
+  string ride_id = 1;
+  string status = 2;
+  int64  final_fare_cents = 3;
+  string driver_id = 4;
+}

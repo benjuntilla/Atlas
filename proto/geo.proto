@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package atlas.geo;
+
+service GeoEngine {
+  rpc UpdateLocation(LocationUpdate) returns (LocationAck);
+  rpc GetNearby(NearbyRequest) returns (NearbyResponse);
+  rpc ScoreRoute(RouteScoreRequest) returns (RouteScoreResponse);
+  rpc TriggerGeofenceCheck(GeofenceCheckRequest) returns (GeofenceCheckResponse);
+}
+
+message LocationUpdate {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+  int64  recorded_at = 4;
+}
+
+message LocationAck { bool ok = 1; }
+
+message NearbyRequest {
+  string requester_user_id = 1;
+  double lat = 2;
+  double lng = 3;
+  double radius_m = 4;
+  string role = 5; // "driver" | "walker"
+}
+
+message NearbyUser {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+  double distance_m = 4;
+  double safety_score = 5;
+}
+
+message NearbyResponse { repeated NearbyUser users = 1; }
+
+message RouteScoreRequest {
+  string user_id = 1;
+  repeated RouteCandidate candidates = 2;
+}
+
+message RouteCandidate {
+  string route_id = 1;
+  repeated LatLng points = 2;
+}
+
+message LatLng { double lat = 1; double lng = 2; }
+
+message RouteScoreResponse {
+  string best_route_id = 1;
+  double score = 2;
+  repeated ScoredRoute all_scores = 3;
+}
+
+message ScoredRoute {
+  string route_id = 1;
+  double score = 2;
+}
+
+message GeofenceCheckRequest {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+}
+
+message GeofenceCheckResponse {
+  bool triggered = 1;
+  repeated string geofence_ids = 2;
+}

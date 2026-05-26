@@ -1,0 +1,52 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Kotlin / Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+*.class
+.kotlin/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / Flutter (clients)
+node_modules/
+clients/wayfinder-web/dist/
+clients/wayfinder-web/.next/
+clients/haggle-mobile/.dart_tool/
+clients/haggle-mobile/build/
+
+# Local env
+.env
+.env.local
+*.local
+
+# Docker
+atlas_pg_data/
+
+# Logs
+*.log
+
+# Terraform
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate
+infra/terraform/**/*.tfstate.backup
+infra/terraform/**/.terraform.lock.hcl
+infra/terraform/**/*.tfvars
+!infra/terraform/**/*.tfvars.example
+
+# Generated protobuf code (each service regenerates from proto/)
+**/generated/
+**/gen/

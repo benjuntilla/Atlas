@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package atlas.events;
+
+// Payload schemas for every Kafka topic. Producers and consumers across
+// Rust and Kotlin services must encode/decode using these definitions.
+//
+// Topic -> message mapping:
+//   atlas.location.updates -> LocationUpdateEvent
+//   atlas.fare.events      -> FareEvent
+//   atlas.auth.tokens      -> AuthTokenEvent
+//   atlas.safety.alerts    -> SafetyAlertEvent
+//   atlas.elo.recompute    -> EloRecomputeEvent
+
+message LocationUpdateEvent {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+  int64  recorded_at = 4; // unix epoch seconds
+}
+
+message FareEvent {
+  string ride_id = 1;
+  string transaction_id = 2; // empty until payments creates one
+  EventType event_type = 3;
+  int64  amount_cents = 4;
+  int64  occurred_at = 5;
+
+  enum EventType {
+    UNKNOWN = 0;
+    RIDE_ACCEPTED = 1;     // pre-authorize fare
+    RIDE_COMPLETED = 2;    // settle
+    RIDE_CANCELLED = 3;    // refund if a transaction exists
+    TRANSACTION_SETTLED = 4;
+    TRANSACTION_REFUNDED = 5;
+  }
+}
+
+message AuthTokenEvent {
+  string user_id = 1;
+  string token_hash = 2; // sha256 hex of the JWT, never the raw token
+  string session_id = 3;
+  EventType event_type = 4;
+  int64  occurred_at = 5;
+
+  enum EventType {
+    UNKNOWN = 0;
+    ISSUED = 1;
+    REVOKED = 2;
+  }
+}
+
+message SafetyAlertEvent {
+  string user_id = 1;
+  string geofence_id = 2;
+  string route_id = 3;
+  AlertType alert_type = 4;
+  int64  triggered_at = 5;
+
+  enum AlertType {
+    UNKNOWN = 0;
+    GEOFENCE_ENTERED = 1;
+    OFF_ROUTE = 2;
+    ARRIVAL_OVERDUE = 3;
+  }
+}
+
+message EloRecomputeEvent {
+  repeated string segment_ids = 1;
+  TriggerType trigger_type = 2;
+  int64  occurred_at = 3;
+
+  enum TriggerType {
+    UNKNOWN = 0;
+    NIGHTLY_BATCH = 1;
+    NEW_VOTE = 2;
+    MANUAL = 3;
+  }
+}

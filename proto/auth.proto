@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package atlas.auth;
+
+service AuthService {
+  // Public credential flows
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Authenticate(AuthRequest) returns (TokenResponse);
+
+  // Internal / refresh primitive. Not exposed via the gateway.
+  rpc IssueToken(IssueTokenRequest) returns (TokenResponse);
+
+  rpc ValidateToken(ValidateTokenRequest) returns (TokenClaims);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeResponse);
+}
+
+message RegisterRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message RegisterResponse {
+  string user_id = 1;
+}
+
+message AuthRequest {
+  string email = 1;
+  string password = 2;
+  // Optional location hint stamped into JWT claims on successful auth.
+  double lat = 3;
+  double lng = 4;
+}
+
+message IssueTokenRequest {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+}
+
+message TokenResponse {
+  string token = 1;
+  int64 expires_at = 2;
+}
+
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+message TokenClaims {
+  string user_id = 1;
+  double last_lat = 2;
+  double last_lng = 3;
+  int64 issued_at = 4;
+  int64 expires_at = 5;
+  string session_id = 6;
+}
+
+message RevokeTokenRequest { string token = 1; }
+message RevokeResponse     { bool success = 1; }
