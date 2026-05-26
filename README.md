@@ -1,96 +1,84 @@
 # Atlas
 
-Real-time urban mobility and safety platform. Atlas is a shared trust layer
-that Wayfinder (safety navigation) and Haggle (fare negotiation) both run on
-top of. One identity, one location context, one safety graph.
+**Atlas is a real-time urban mobility and safety platform.** It acts as a
+shared trust layer for two consumer products: **Wayfinder**, a safety-aware
+walking navigation app, and **Haggle**, a fare-negotiation rideshare app.
+Both run on top of the same identity, location, and safety graph.
 
-> **Phase 1 only.** The repository currently contains the monorepo scaffold,
-> gRPC contracts, Kafka event schemas, SQL migrations, and the local
-> docker-compose environment. Service implementations land in subsequent
-> phases.
+The core idea: when a user opens Haggle to book a ride, the platform already
+knows their location from Wayfinder, has already scored the surrounding
+streets using a shared ELO-based safety rating, and settles the fare through
+the same payments rail. One identity, one location context, one safety graph.
 
-## Repo layout
+## Why this project exists
+
+Most consumer mobility apps re-solve the same hard problems in isolation —
+identity, geospatial search, trust scoring, real-time messaging, payments —
+and don't share signal across products. Atlas is a study in what those
+problems look like when you build them once, as services, and let multiple
+product surfaces consume them.
+
+It is intentionally polyglot and event-driven: the systems work was the
+point, not the product.
+
+## Technical scope
+
+| Area | Technology |
+|---|---|
+| Backend services | **Rust** (Axum, Tonic) and **Kotlin** (Ktor) |
+| Inter-service RPC | **gRPC** with shared `.proto` contracts |
+| Event bus | **Apache Kafka** with protobuf-encoded payloads |
+| Database | **PostgreSQL 15** with **PostGIS** (per-service schemas, single instance) |
+| Clients | **React + TypeScript + Mapbox GL JS**, **Flutter + Dart + Riverpod** |
+| Infrastructure | **Terraform**, **Kubernetes** (GKE), **Docker Compose** for local dev |
+| Observability | **Prometheus** metrics, structured JSON logging, distributed tracing |
+| CI/CD | **GitHub Actions** |
+
+## Architecture at a glance
 
 ```
-atlas/
-├── proto/              # gRPC contracts + Kafka event schemas (events.proto)
-├── migrations/         # Numbered SQL files, applied in order
-├── services/           # gateway, geo-engine, auth, payments, wayfinder, haggle
-├── consumers/          # location, fare, safety Kafka consumers
-├── clients/            # wayfinder-web (React), haggle-mobile (Flutter)
-├── infra/
-│   ├── k8s/            # Kubernetes manifests, including kafka-topics.yaml
-│   └── terraform/      # GCP / GKE provisioning
-└── docker-compose.yml  # Local dev environment
+                    ┌─────────────────┐
+       HTTPS        │   API Gateway   │   Rust / Axum
+   ────────────────▶│   (port 8080)   │   JWT validation, REST → gRPC fanout
+                    └────────┬────────┘
+                             │ gRPC
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+  ┌───────────┐       ┌────────────┐       ┌────────────┐
+  │   auth    │       │    geo     │       │  payments  │
+  │ (Kotlin)  │       │   (Rust)   │       │  (Kotlin)  │
+  └─────┬─────┘       └──────┬─────┘       └─────┬──────┘
+        │                    │                   │
+        └────────────────────┼───────────────────┘
+                             ▼
+                    ┌─────────────────┐
+                    │     Kafka       │
+                    └────────┬────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+  ┌───────────┐       ┌────────────┐       ┌────────────┐
+  │ location  │       │   safety   │       │    fare    │
+  │ consumer  │       │  consumer  │       │  consumer  │
+  └───────────┘       └────────────┘       └────────────┘
+
+  Products that consume the platform:
+    Wayfinder (Rust backend + React web client)
+    Haggle    (Kotlin backend + Flutter mobile client)
 ```
 
-## Local setup (Phase 1)
+Six services, three consumers, two client apps. Every service owns one
+database schema. Cross-service communication happens through gRPC for
+synchronous calls and Kafka for asynchronous events.
 
-```bash
-# Bring up Postgres + Kafka. Migrations apply on first boot via
-# the docker-entrypoint-initdb.d mount.
-docker compose up -d postgres kafka
+## Status
 
-# Watch migrations apply.
-docker compose logs postgres | grep -i 'CREATE\|migration'
+In active development. The repository currently contains the gRPC
+contracts, Kafka event schemas, database migrations, and the local
+development environment. Service implementations are being built in
+ordered phases.
 
-# Verify schemas exist.
-psql postgres://atlas:atlas_dev@localhost:5432/atlas -c '\dn'
-# Expected: auth, geo, payments, wayfinder, haggle (plus public)
+## Author
 
-# Verify PostGIS is enabled and tables landed.
-psql postgres://atlas:atlas_dev@localhost:5432/atlas -c \
-  "SELECT schemaname, tablename FROM pg_tables
-   WHERE schemaname IN ('auth','geo','payments','wayfinder','haggle')
-   ORDER BY schemaname, tablename;"
-```
-
-Postgres data is persisted in the `atlas_pg_data` named volume. To start
-from a clean slate (re-run all migrations):
-
-```bash
-docker compose down -v
-docker compose up -d postgres
-```
-
-## Architecture (planned)
-
-| Service | Language | Port | Owns schema | Phase |
-|---|---|---|---|---|
-| gateway | Rust (Axum) | 8080 | — | 5 |
-| auth-service | Kotlin (Ktor) | 50051 | `auth` | 2 |
-| geo-engine | Rust (Axum + tonic) | 50052 | `geo` | 3 |
-| payments-service | Kotlin (Ktor) | 50053 | `payments` | 4 |
-| wayfinder | Rust (Axum) | 50054 | `wayfinder` | 7 |
-| haggle | Kotlin (Ktor) | 50055 | `haggle` | 8 |
-| location-consumer | Rust | — | reads `geo`, `wayfinder` | 6 |
-| fare-consumer | Kotlin | — | writes `payments` | 6 |
-| safety-consumer | Rust | — | reads `wayfinder`, `geo` | 6 |
-
-## Kafka topics
-
-All payloads are protobuf-encoded. Schemas live in [`proto/events.proto`](proto/events.proto).
-
-| Topic | Producer | Consumers |
-|---|---|---|
-| `atlas.location.updates` | geo-engine | location-consumer, safety-consumer |
-| `atlas.fare.events` | haggle, payments-service | fare-consumer |
-| `atlas.auth.tokens` | auth-service | gateway (cache invalidation) |
-| `atlas.safety.alerts` | safety-consumer | wayfinder |
-| `atlas.elo.recompute` | location-consumer | geo-engine |
-
-## Build order
-
-1. **Phase 1 — Foundations** *(done)* — scaffold, protos, migrations, docker-compose
-2. Phase 2 — Auth service (Kotlin)
-3. Phase 3 — Geo engine (Rust)
-4. Phase 4 — Payments service (Kotlin)
-5. Phase 5 — API gateway (Rust)
-6. Phase 6 — Kafka consumers
-7. Phase 7 — Wayfinder backend
-8. Phase 8 — Haggle backend
-9. Phase 9 — Terraform + GKE
-10. Phase 10 — Kubernetes manifests
-11. Phase 11 — CI/CD
-12. Phase 12 — Observability
-13. Phase 13 — README expansion + load test results
+Naing Lynn — building Atlas to demonstrate distributed systems work across
+Rust, Kotlin, and cloud infrastructure.
