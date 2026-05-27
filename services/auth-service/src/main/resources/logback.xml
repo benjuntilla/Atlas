@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structured JSON logging. Every line is one JSON object with at minimum:
+    timestamp, level, logger, message, thread, and (when in scope) MDC keys:
+    service, trace_id, user_id, duration_ms.
+
+  Phase 2B adds the trace_id and user_id MDC keys on each gRPC request.
+-->
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"service":"atlas-auth"}</customFields>
+            <includeMdc>true</includeMdc>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+    </root>
+
+    <!-- Reduce Exposed and Hikari noise unless explicitly debugging. -->
+    <logger name="Exposed" level="WARN" />
+    <logger name="com.zaxxer.hikari" level="WARN" />
+
+</configuration>

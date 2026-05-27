@@ -1,0 +1,39 @@
+# Centralized version catalog. Every Kotlin module references library versions
+# from here so upgrades happen in one place.
+
+[versions]
+kotlin = "2.0.21"
+exposed = "0.55.0"
+hikari = "5.1.0"
+postgres = "42.7.4"
+jose4j = "0.9.6"
+jbcrypt = "0.4"
+slf4j = "2.0.16"
+logback = "1.5.12"
+logstash-encoder = "8.0"
+junit = "5.11.3"
+
+[libraries]
+# Database
+exposed-core = { module = "org.jetbrains.exposed:exposed-core", version.ref = "exposed" }
+exposed-jdbc = { module = "org.jetbrains.exposed:exposed-jdbc", version.ref = "exposed" }
+exposed-java-time = { module = "org.jetbrains.exposed:exposed-java-time", version.ref = "exposed" }
+hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
+postgres = { module = "org.postgresql:postgresql", version.ref = "postgres" }
+
+# Crypto
+jose4j = { module = "org.bitbucket.b_c:jose4j", version.ref = "jose4j" }
+jbcrypt = { module = "org.mindrot:jbcrypt", version.ref = "jbcrypt" }
+
+# Logging
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+logstash-encoder = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstash-encoder" }
+
+# Testing
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

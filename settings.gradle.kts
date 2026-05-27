@@ -8,7 +8,7 @@
 rootProject.name = "atlas"
 
 // Phase 2
-// include("services:auth-service")
+include("services:auth-service")
 // Phase 4
 // include("services:payments-service")
 // Phase 6
