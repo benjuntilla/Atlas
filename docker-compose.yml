@@ -7,7 +7,7 @@
 #   Phase 4 -> payments-service
 #   Phase 5 -> gateway
 #   Phase 6 -> consumers
-#   Phase 7/8 -> wayfinder, haggle
+#   Phase 7 -> control-plane
 #
 # Usage:
 #   docker compose up -d postgres kafka      # Phase 1
@@ -104,27 +104,17 @@ services:
   #     PAYMENTS_SERVICE_ADDR: http://payments-service:50053
   #     HAGGLE_SERVICE_ADDR: http://haggle:50055
 
-  # --- Phase 7: wayfinder (Rust/Axum) ---------------------------------------
-  # wayfinder:
-  #   build: ./services/wayfinder
-  #   ports: ["50054:50054"]
-  #   depends_on: [geo-engine, auth-service, kafka]
+  # --- Phase 7: control-plane (Rust/Axum) -----------------------------------
+  # Backend the developer CLI and dashboard talk to: signup, project
+  # provisioning, API keys, usage stats, log streaming.
+  # control-plane:
+  #   build: ./services/control-plane
+  #   ports: ["8081:8081"]
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     kafka: { condition: service_started }
   #   environment:
   #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     GEO_ENGINE_ADDR: http://geo-engine:50052
-  #     AUTH_SERVICE_ADDR: http://auth-service:50051
-  #     KAFKA_BROKERS: kafka:29092
-
-  # --- Phase 8: haggle (Kotlin/Ktor) ----------------------------------------
-  # haggle:
-  #   build: ./services/haggle
-  #   ports: ["50055:50055"]
-  #   depends_on: [geo-engine, auth-service, payments-service, kafka]
-  #   environment:
-  #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     GEO_ENGINE_ADDR: http://geo-engine:50052
-  #     AUTH_SERVICE_ADDR: http://auth-service:50051
-  #     PAYMENTS_SERVICE_ADDR: http://payments-service:50053
   #     KAFKA_BROKERS: kafka:29092
 
 volumes:

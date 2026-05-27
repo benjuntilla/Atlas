@@ -13,8 +13,6 @@ rootProject.name = "atlas"
 // include("services:payments-service")
 // Phase 6
 // include("consumers:fare-consumer")
-// Phase 8
-// include("services:haggle")
 
 pluginManagement {
     repositories {

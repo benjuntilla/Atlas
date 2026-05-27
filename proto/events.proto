@@ -53,15 +53,13 @@ message AuthTokenEvent {
 message SafetyAlertEvent {
   string user_id = 1;
   string geofence_id = 2;
-  string route_id = 3;
-  AlertType alert_type = 4;
-  int64  triggered_at = 5;
+  AlertType alert_type = 3;
+  int64  triggered_at = 4;
 
   enum AlertType {
     UNKNOWN = 0;
     GEOFENCE_ENTERED = 1;
-    OFF_ROUTE = 2;
-    ARRIVAL_OVERDUE = 3;
+    GEOFENCE_EXITED = 2;
   }
 }
 
