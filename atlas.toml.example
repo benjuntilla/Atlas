@@ -1,0 +1,35 @@
+# Example atlas.toml.
+# Copy to `atlas.toml` and replace the API key with one from your Atlas project.
+# Validate with: `atlas validate`
+
+[project]
+name        = "my-mobility-app"
+api_key     = "atl_live_xxxxxxxxxxxxxxxxxxxxxxxx"
+environment = "production"        # development | staging | production
+region      = "us-central1"       # us-central1 | eu-west1 | ap-southeast1
+
+[services]
+auth     = true
+geo      = true
+payments = true
+events   = true
+
+[auth]
+token_expiry_seconds = 3600
+geo_claims           = true
+
+[geo]
+default_radius_m     = 500
+elo_recompute_cron   = "0 3 * * *"
+location_ttl_hours   = 24
+
+[payments]
+currency             = "USD"
+settlement_mode      = "auto"      # auto | manual
+idempotency_window_s = 86400
+
+[events]
+# Short topic names. The platform prepends `atlas.` internally.
+# Known topics: location.updates, fare.events, auth.tokens, safety.alerts, elo.recompute
+topics          = ["location.updates", "fare.events", "auth.tokens", "safety.alerts"]
+retention_hours = 168

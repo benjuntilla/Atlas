@@ -1,0 +1,24 @@
+[package]
+name = "atlas-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Developer CLI for the Atlas platform: validate atlas.toml, deploy projects, manage API keys, tail logs."
+license = "MIT"
+
+[[bin]]
+name = "atlas"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+owo-colors = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Workspace inherits aren't strictly needed for dev-deps but keep parity.

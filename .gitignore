@@ -33,6 +33,10 @@ clients/haggle-mobile/build/
 .env.local
 *.local
 
+# Per-developer Atlas project config (contains API key). Template is
+# committed as atlas.toml.example; this file is per-machine.
+atlas.toml
+
 # Docker
 atlas_pg_data/
 
