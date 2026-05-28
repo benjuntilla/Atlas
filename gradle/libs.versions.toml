@@ -12,6 +12,15 @@ slf4j = "2.0.16"
 logback = "1.5.12"
 logstash-encoder = "8.0"
 junit = "5.11.3"
+# Phase 2B additions: gRPC server, protobuf, Kafka producer/consumer, in-process cache.
+grpc = "1.68.1"
+grpc-kotlin = "1.4.1"
+protobuf = "3.25.5"
+kafka = "3.8.1"
+caffeine = "3.1.8"
+kotlinx-coroutines = "1.9.0"
+protobuf-plugin = "0.9.4"
+shadow-plugin = "8.1.1"
 
 [libraries]
 # Database
@@ -30,10 +39,34 @@ slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 logstash-encoder = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstash-encoder" }
 
+# gRPC + protobuf (Phase 2B)
+grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
+grpc-services = { module = "io.grpc:grpc-services", version.ref = "grpc" }
+grpc-kotlin-stub = { module = "io.grpc:grpc-kotlin-stub", version.ref = "grpc-kotlin" }
+protobuf-kotlin = { module = "com.google.protobuf:protobuf-kotlin", version.ref = "protobuf" }
+protoc = { module = "com.google.protobuf:protoc", version.ref = "protobuf" }
+grpc-codegen-java = { module = "io.grpc:protoc-gen-grpc-java", version.ref = "grpc" }
+grpc-codegen-kotlin = { module = "io.grpc:protoc-gen-grpc-kotlin", version.ref = "grpc-kotlin" }
+
+# Kafka (Phase 2B)
+kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafka" }
+
+# Cache (Phase 2B)
+caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
+
+# Coroutines (Phase 2B; grpc-kotlin stubs are coroutine-based)
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+
 # Testing
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+grpc-testing = { module = "io.grpc:grpc-testing", version.ref = "grpc" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+protobuf = { id = "com.google.protobuf", version.ref = "protobuf-plugin" }
+shadow = { id = "com.github.johnrengelman.shadow", version.ref = "shadow-plugin" }

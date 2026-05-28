@@ -59,17 +59,24 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
-  # --- Phase 2: auth-service (Kotlin/Ktor) ----------------------------------
-  # auth-service:
-  #   build: ./services/auth-service
-  #   ports: ["50051:50051"]
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #     kafka: { condition: service_started }
-  #   environment:
-  #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     KAFKA_BROKERS: kafka:29092
-  #     JWT_SECRET: dev_secret_change_in_prod
+  # --- Phase 2: auth-service (Kotlin/gRPC) ----------------------------------
+  auth-service:
+    build:
+      # Build context is the repo root so the Dockerfile can pull files from
+      # both /proto and /services/auth-service. Phase 2A's commented stanza
+      # used `./services/auth-service` as context which would not have worked
+      # once the protobuf-gradle-plugin started reading from $rootDir/proto.
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    ports: ["50051:50051"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      JWT_SECRET: dev_secret_change_in_prod_dev_secret_change_in_prod
+      GRPC_PORT: "50051"
 
   # --- Phase 3: geo-engine (Rust) -------------------------------------------
   # geo-engine:

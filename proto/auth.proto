@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package atlas.auth;
 
+option java_multiple_files = true;
+option java_package = "atlas.auth";
+
 service AuthService {
   // Public credential flows
   rpc Register(RegisterRequest) returns (RegisterResponse);

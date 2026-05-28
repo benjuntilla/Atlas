@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package atlas.events;
 
+option java_multiple_files = true;
+option java_package = "atlas.events";
+
 // Payload schemas for every Kafka topic. Producers and consumers across
 // Rust and Kotlin services must encode/decode using these definitions.
 //

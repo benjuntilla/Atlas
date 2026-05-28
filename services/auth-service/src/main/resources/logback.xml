@@ -22,5 +22,7 @@
     <!-- Reduce Exposed and Hikari noise unless explicitly debugging. -->
     <logger name="Exposed" level="WARN" />
     <logger name="com.zaxxer.hikari" level="WARN" />
+    <!-- Kafka client is chatty at INFO; quiet it down (Phase 2B). -->
+    <logger name="org.apache.kafka" level="WARN" />
 
 </configuration>
