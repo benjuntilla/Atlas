@@ -79,15 +79,26 @@ services:
       GRPC_PORT: "50051"
 
   # --- Phase 3: geo-engine (Rust) -------------------------------------------
-  # geo-engine:
-  #   build: ./services/geo-engine
-  #   ports: ["50052:50052"]
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #     kafka: { condition: service_started }
-  #   environment:
-  #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     KAFKA_BROKERS: kafka:29092
+  geo-engine:
+    # The Dockerfile COPYs the whole workspace because rdkafka and the
+    # proto build need files outside services/geo-engine. Build context
+    # must therefore be the repo root.
+    build:
+      context: .
+      dockerfile: services/geo-engine/Dockerfile
+    ports:
+      - "50052:50052"
+      - "9091:9090"  # host 9091 -> container 9090 to avoid a clash later
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC_LOCATION_UPDATES: atlas.location.updates
+      GRPC_ADDR: 0.0.0.0:50052
+      METRICS_ADDR: 0.0.0.0:9090
+      RUST_LOG: info,atlas_geo_engine=debug
 
   # --- Phase 4: payments-service (Kotlin/Ktor) ------------------------------
   # payments-service:

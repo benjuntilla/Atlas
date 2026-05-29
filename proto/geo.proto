@@ -7,6 +7,13 @@ service GeoEngine {
   rpc GetNearby(NearbyRequest) returns (NearbyResponse);
   rpc ScoreRoute(RouteScoreRequest) returns (RouteScoreResponse);
   rpc TriggerGeofenceCheck(GeofenceCheckRequest) returns (GeofenceCheckResponse);
+
+  // Phase 3: developer-facing geofence CRUD. Geofences are owned by a
+  // user_id; what the developer does with them (alerting, gating routes,
+  // pickup zones, etc.) is the developer's choice.
+  rpc CreateGeofence(CreateGeofenceRequest) returns (Geofence);
+  rpc ListGeofences(ListGeofencesRequest) returns (ListGeofencesResponse);
+  rpc DeleteGeofence(DeleteGeofenceRequest) returns (DeleteGeofenceResponse);
 }
 
 message LocationUpdate {
@@ -24,6 +31,8 @@ message NearbyRequest {
   double lng = 3;
   double radius_m = 4;
   string role = 5; // "driver" | "walker"
+  // 0 means default 20, max 100. Enforced in the service layer.
+  uint32 limit = 6;
 }
 
 message NearbyUser {
@@ -68,4 +77,42 @@ message GeofenceCheckRequest {
 message GeofenceCheckResponse {
   bool triggered = 1;
   repeated string geofence_ids = 2;
+}
+
+// --- Geofence CRUD (Phase 3) ------------------------------------------------
+
+message Geofence {
+  string id = 1;
+  string user_id = 2;
+  string label = 3;       // empty string means no label
+  double center_lat = 4;
+  double center_lng = 5;
+  double radius_m = 6;
+  bool   active = 7;
+  int64  created_at = 8;  // unix epoch seconds
+}
+
+message CreateGeofenceRequest {
+  string user_id = 1;
+  string label = 2;       // empty string = NULL in DB
+  double center_lat = 3;
+  double center_lng = 4;
+  double radius_m = 5;
+}
+
+message ListGeofencesRequest {
+  string user_id = 1;
+  bool active_only = 2;
+}
+
+message ListGeofencesResponse {
+  repeated Geofence geofences = 1;
+}
+
+message DeleteGeofenceRequest {
+  string geofence_id = 1;
+}
+
+message DeleteGeofenceResponse {
+  bool deleted = 1;
 }

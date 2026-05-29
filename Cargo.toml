@@ -9,7 +9,7 @@ members = [
     # Phase 0 — platform developer surface
     "cli",
     # Phase 3
-    # "services/geo-engine",
+    "services/geo-engine",
     # Phase 5
     # "services/gateway",
     # Phase 6
@@ -25,6 +25,9 @@ axum = "0.7"
 tonic = "0.11"
 tonic-build = "0.11"
 tonic-health = "0.11"
+prost-build = "0.12"
+async-trait = "0.1"
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }

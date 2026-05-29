@@ -1,0 +1,38 @@
+[package]
+name = "atlas-geo-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Geospatial engine for the Atlas platform: PostGIS-backed proximity, route scoring, and geofence CRUD over gRPC."
+license = "MIT"
+
+[[bin]]
+name = "atlas-geo-engine"
+path = "src/main.rs"
+
+[dependencies]
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+rdkafka = { workspace = true }
+prost = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+prost-build = { workspace = true }
+
+[dev-dependencies]
+# Integration tests reuse the same deps as the binary.
