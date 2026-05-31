@@ -21,6 +21,10 @@ caffeine = "3.1.8"
 kotlinx-coroutines = "1.9.0"
 protobuf-plugin = "0.9.4"
 shadow-plugin = "8.1.1"
+# Phase 4 additions: Ktor HTTP server (metrics + provider webhooks) and
+# Micrometer's Prometheus registry for the /metrics endpoint.
+ktor = "2.3.13"
+micrometer = "1.13.6"
 
 [libraries]
 # Database
@@ -55,6 +59,15 @@ kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafk
 
 # Cache (Phase 2B)
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
+
+# Ktor HTTP server (Phase 4; payments serves /metrics + /webhooks on one Netty)
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
+ktor-server-content-negotiation = { module = "io.ktor:ktor-server-content-negotiation", version.ref = "ktor" }
+ktor-serialization-jackson = { module = "io.ktor:ktor-serialization-jackson", version.ref = "ktor" }
+
+# Metrics (Phase 4; Prometheus exposition for the payments /metrics scrape)
+micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus", version.ref = "micrometer" }
 
 # Coroutines (Phase 2B; grpc-kotlin stubs are coroutine-based)
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }

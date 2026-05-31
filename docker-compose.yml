@@ -101,15 +101,25 @@ services:
       RUST_LOG: info,atlas_geo_engine=debug
 
   # --- Phase 4: payments-service (Kotlin/Ktor) ------------------------------
-  # payments-service:
-  #   build: ./services/payments-service
-  #   ports: ["50053:50053"]
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #     kafka: { condition: service_started }
-  #   environment:
-  #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     KAFKA_BROKERS: kafka:29092
+  payments-service:
+    # Build context is the repo root so the Dockerfile can pull files from both
+    # /proto and /services/payments-service (the protobuf-gradle-plugin reads
+    # from $rootDir/proto). gRPC on 50053; HTTP (/metrics + webhooks) on 8053.
+    build:
+      context: .
+      dockerfile: services/payments-service/Dockerfile
+    ports:
+      - "50053:50053"
+      - "8053:8053"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC_FARE_EVENTS: atlas.fare.events
+      GRPC_PORT: "50053"
+      HTTP_PORT: "8053"
 
   # --- Phase 5: gateway (Rust/Axum) -----------------------------------------
   # gateway:
