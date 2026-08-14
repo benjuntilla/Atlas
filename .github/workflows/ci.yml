@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run obsolete. Cancel it
+# rather than paying for two runs of the same suite.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately no `RUSTFLAGS: -D warnings` here. RUSTFLAGS applies to
+  # dependency crates as well as workspace ones, so a single warning in a
+  # third-party crate would fail the build — sqlx-postgres 0.7 already
+  # emits a future-incompatibility warning that would do exactly that.
+  # `cargo clippy -- -D warnings` below applies only to the workspace
+  # members being linted, and clippy runs the plain rustc lints too, so
+  # unused imports and friends are still hard errors where we control them.
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc is a hard build dependency: every Rust service runs
+      # tonic-build in build.rs, and without it `cargo check` fails before
+      # compiling a single line. cmake is needed separately by rdkafka,
+      # which builds librdkafka from source for geo-engine.
+      - name: Install protobuf compiler and cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler cmake
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Integration tests that need Postgres are #[ignore]d, so this run
+      # covers unit tests only. The `integration` job below runs the rest.
+      - name: Test
+        run: cargo test --workspace
+
+  kotlin:
+    name: Kotlin (auth, payments)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Matches the jvmTarget set in the root build.gradle.kts.
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # No system protoc here on purpose: protobuf-gradle-plugin resolves
+      # the protoc binary from Maven (see gradle/libs.versions.toml), so
+      # the Kotlin build is self-contained.
+      - name: Build and test
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-test-reports
+          path: services/*/build/reports/tests/
+          retention-days: 7
+
+  integration:
+    name: Migrations + DB integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Must match the image in docker-compose.yml — the migrations use
+        # PostGIS types, so plain postgres:15 would fail on 0001.
+        image: postgis/postgis:15-3.3
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas_dev
+          POSTGRES_DB: atlas
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler, cmake, and psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler cmake postgresql-client
+
+      # docker-compose mounts migrations/ into /docker-entrypoint-initdb.d,
+      # which only runs on a database's FIRST boot. That means a broken
+      # migration is invisible to anyone with an existing volume. Applying
+      # them explicitly here is the only thing that actually checks the SQL.
+      #
+      # `-v ON_ERROR_STOP=1` matters: without it psql reports success even
+      # when statements fail.
+      - name: Apply migrations in order
+        env:
+          PGPASSWORD: atlas_dev
+        run: |
+          for f in migrations/*.sql; do
+            echo "--- applying $f"
+            psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas -f "$f"
+          done
+
+      - name: Verify expected schemas exist
+        env:
+          PGPASSWORD: atlas_dev
+        run: |
+          psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas -c '\dn'
+          for schema in auth geo payments; do
+            psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas \
+              -tAc "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$schema'" \
+              | grep -q 1 || { echo "schema $schema missing"; exit 1; }
+          done
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The #[ignore]d sqlx tests in geo-engine hit the database directly at
+      # the same URL docker-compose uses.
+      - name: Run DB-backed integration tests
+        run: cargo test -p atlas-geo-engine -- --include-ignored
+
+  compose:
+    name: docker-compose syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Catches YAML errors and bad interpolation in the file every
+      # contributor uses to run the stack locally. Does not build images.
+      - name: Validate compose file
+        run: docker compose config --quiet

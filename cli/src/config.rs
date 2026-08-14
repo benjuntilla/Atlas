@@ -221,7 +221,10 @@ impl AtlasConfig {
                 self.project.name
             )));
         }
-        if !KEY_PREFIXES.iter().any(|p| self.project.api_key.starts_with(p)) {
+        if !KEY_PREFIXES
+            .iter()
+            .any(|p| self.project.api_key.starts_with(p))
+        {
             return Err(ConfigError::Validation(format!(
                 "project.api_key must start with one of {:?}",
                 KEY_PREFIXES
@@ -638,7 +641,10 @@ auth = true
 "#
             );
             let err = parse(&toml).unwrap_err();
-            assert!(matches!(err, ConfigError::Validation(_)), "name {bad:?} should be rejected, got {err:?}");
+            assert!(
+                matches!(err, ConfigError::Validation(_)),
+                "name {bad:?} should be rejected, got {err:?}"
+            );
         }
     }
 
@@ -727,7 +733,10 @@ currency = "{bad}"
 "#
             );
             let err = parse(&toml).unwrap_err();
-            assert!(matches!(err, ConfigError::Validation(_)), "currency {bad:?} should be rejected, got {err:?}");
+            assert!(
+                matches!(err, ConfigError::Validation(_)),
+                "currency {bad:?} should be rejected, got {err:?}"
+            );
         }
     }
 
