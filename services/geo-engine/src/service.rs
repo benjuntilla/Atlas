@@ -197,7 +197,11 @@ impl GeoEngine for GeoEngineImpl {
         // Best = highest ELO. Stable: first candidate wins on ties.
         let best = scored
             .iter()
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .expect("non-empty after validation");
 
         Ok(Response::new(RouteScoreResponse {
@@ -320,10 +324,7 @@ mod tests {
     #[test]
     fn parse_user_id_accepts_uuid() {
         let id = parse_user_id("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(
-            id.to_string(),
-            "550e8400-e29b-41d4-a716-446655440000"
-        );
+        assert_eq!(id.to_string(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]

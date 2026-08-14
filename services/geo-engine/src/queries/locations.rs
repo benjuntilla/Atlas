@@ -52,6 +52,15 @@ pub struct NearbyRow {
 /// requester. Joined to safety_ratings within 200m for an aggregate
 /// safety score; defaults to 1500.0 (the ELO neutral score) when no
 /// nearby ratings exist.
+///
+/// # Why every spatial predicate casts to `::geography`
+///
+/// `geo.locations.position` is `GEOMETRY(Point, 4326)`. On a *geometry*,
+/// `ST_DWithin` and `ST_Distance` work in the SRID's own units, and 4326's
+/// unit is the **degree** — so `ST_DWithin(a, b, 250)` asks "within 250
+/// degrees", roughly 27,000 km, and matches every row on Earth. Casting
+/// both operands to `geography` switches PostGIS to spheroidal maths in
+/// **meters**, which is what the `_m` suffix has always claimed.
 pub async fn nearby(
     pool: &PgPool,
     lat: f64,
@@ -67,17 +76,17 @@ pub async fn nearby(
             ST_X(l.position::geometry) AS lng,
             ST_Y(l.position::geometry) AS lat,
             ST_Distance(
-                l.position::geometry,
-                ST_SetSRID(ST_MakePoint($1, $2), 4326)::geometry
+                l.position::geography,
+                ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
             ) AS distance_m,
             COALESCE(AVG(sr.elo_score), 1500.0) AS safety_score
         FROM geo.locations l
         LEFT JOIN geo.safety_ratings sr
-            ON ST_DWithin(sr.segment_geom, l.position::geometry, 200)
+            ON ST_DWithin(sr.segment_geom::geography, l.position::geography, 200)
         WHERE
             ST_DWithin(
-                l.position::geometry,
-                ST_SetSRID(ST_MakePoint($1, $2), 4326)::geometry,
+                l.position::geography,
+                ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
                 $3
             )
             AND l.expires_at > NOW()

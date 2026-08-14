@@ -34,11 +34,9 @@ async fn main() -> anyhow::Result<()> {
         .context("postgres connection")?;
     info!("postgres pool ready");
 
-    let producer = kafka::LocationProducer::new(
-        &cfg.kafka_brokers,
-        cfg.kafka_topic_location_updates.clone(),
-    )
-    .context("kafka producer")?;
+    let producer =
+        kafka::LocationProducer::new(&cfg.kafka_brokers, cfg.kafka_topic_location_updates.clone())
+            .context("kafka producer")?;
     info!(brokers = %cfg.kafka_brokers, topic = %cfg.kafka_topic_location_updates, "kafka producer ready");
 
     let svc = service::GeoEngineImpl::new(pool, producer);

@@ -1,3 +1,12 @@
+// `tonic::Status` is ~176 bytes, which trips clippy's `result_large_err`
+// on every helper that returns `Result<_, Status>`. Boxing it is not an
+// option worth taking here: the tonic trait methods this crate implements
+// are required to return `Result<Response<T>, Status>` unboxed, so boxing
+// the helpers would mean unwrapping at each call site to satisfy the
+// trait — more allocation and more noise to silence a lint about a type
+// we do not control.
+#![allow(clippy::result_large_err)]
+
 //! Library surface for `atlas-geo-engine`. The binary in `src/main.rs`
 //! consumes this crate; integration tests in `tests/` also do.
 //!

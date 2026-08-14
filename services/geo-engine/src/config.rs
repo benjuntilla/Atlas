@@ -20,9 +20,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://atlas:atlas_dev@localhost:5432/atlas".to_string()
-            }),
+            database_url: env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://atlas:atlas_dev@localhost:5432/atlas".to_string()),
             database_pool_size: env::var("DATABASE_POOL_SIZE")
                 .ok()
                 .and_then(|v| v.parse().ok())

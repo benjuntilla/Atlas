@@ -40,7 +40,10 @@ pub async fn score_route(pool: &PgPool, points: &[(f64, f64)]) -> Result<f64, sq
         SELECT AVG(sr.elo_score)::float8 AS score
         FROM route_segment rs
         LEFT JOIN geo.safety_ratings sr
-            ON ST_DWithin(sr.segment_geom, rs.geom, 30)
+            -- 30 is meters, so both sides are geography. On raw 4326
+            -- geometry this would mean 30 degrees and average the ELO of
+            -- every rating in a third of the planet.
+            ON ST_DWithin(sr.segment_geom::geography, rs.geom::geography, 30)
         "#,
     )
     .bind(payload)
