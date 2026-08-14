@@ -13,8 +13,8 @@ members = [
     # Phase 5
     "services/gateway",
     # Phase 6
-    # "consumers/location-consumer",
-    # "consumers/safety-consumer",
+    "consumers/location-consumer",
+    "consumers/safety-consumer",
     # Phase 7
     # "services/control-plane",
 ]

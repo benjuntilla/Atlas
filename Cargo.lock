@@ -193,6 +193,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-location-consumer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "prost",
+ "prost-build",
+ "rdkafka",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "atlas-safety-consumer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "prost",
+ "prost-build",
+ "rdkafka",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
