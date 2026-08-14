@@ -122,15 +122,34 @@ services:
       HTTP_PORT: "8053"
 
   # --- Phase 5: gateway (Rust/Axum) -----------------------------------------
-  # gateway:
-  #   build: ./services/gateway
-  #   ports: ["8080:8080"]
-  #   depends_on: [auth-service, geo-engine, payments-service]
-  #   environment:
-  #     AUTH_SERVICE_ADDR: http://auth-service:50051
-  #     GEO_ENGINE_ADDR: http://geo-engine:50052
-  #     PAYMENTS_SERVICE_ADDR: http://payments-service:50053
-  #     HAGGLE_SERVICE_ADDR: http://haggle:50055
+  # The only service that should ever be published to the outside world.
+  # Build context is the repo root: it is a Cargo workspace member and its
+  # build.rs reads the .proto files from /proto.
+  #
+  # depends_on uses service_started, not service_healthy: the gateway's
+  # upstream channels are lazy by design (see services/gateway/src/state.rs)
+  # so it comes up regardless and returns 503 per-request until a backend
+  # is actually answering.
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    ports:
+      - "8080:8080"
+      # host 9093 -> container 9090. 9090 is free but 9091 is geo-engine's
+      # and 9092 is Kafka's, so 9093 is the next non-colliding port.
+      - "9093:9090"
+    depends_on:
+      auth-service: { condition: service_started }
+      geo-engine: { condition: service_started }
+      payments-service: { condition: service_started }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8080
+      METRICS_ADDR: 0.0.0.0:9090
+      AUTH_SERVICE_ADDR: http://auth-service:50051
+      GEO_ENGINE_ADDR: http://geo-engine:50052
+      PAYMENTS_SERVICE_ADDR: http://payments-service:50053
+      RUST_LOG: info,atlas_gateway=debug
 
   # --- Phase 7: control-plane (Rust/Axum) -----------------------------------
   # Backend the developer CLI and dashboard talk to: signup, project

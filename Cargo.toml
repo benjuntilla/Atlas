@@ -11,7 +11,7 @@ members = [
     # Phase 3
     "services/geo-engine",
     # Phase 5
-    # "services/gateway",
+    "services/gateway",
     # Phase 6
     # "consumers/location-consumer",
     # "consumers/safety-consumer",
