@@ -114,21 +114,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler cmake postgresql-client
 
-      # docker-compose mounts migrations/ into /docker-entrypoint-initdb.d,
-      # which only runs on a database's FIRST boot. That means a broken
-      # migration is invisible to anyone with an existing volume. Applying
-      # them explicitly here is the only thing that actually checks the SQL.
-      #
-      # `-v ON_ERROR_STOP=1` matters: without it psql reports success even
-      # when statements fail.
-      - name: Apply migrations in order
+      # Before the first cargo invocation: the migration steps below build
+      # the migrator, and an uncached build here would be paid twice.
+      - uses: Swatinem/rust-cache@v2
+
+      # Applied with the same binary production uses, not a psql loop, so
+      # this exercises the migrator itself alongside the SQL.
+      - name: Apply migrations
         env:
-          PGPASSWORD: atlas_dev
+          DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: cargo run -p atlas-migrator -- run
+
+      # Re-running must be a no-op. A migration that is not idempotent at
+      # the runner level would break every redeploy, and this is the
+      # cheapest possible place to catch that.
+      - name: Re-apply is a no-op
+        env:
+          DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
         run: |
-          for f in migrations/*.sql; do
-            echo "--- applying $f"
-            psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas -f "$f"
-          done
+          cargo run -p atlas-migrator -- run
+          cargo run -p atlas-migrator -- status
 
       - name: Verify expected schemas exist
         env:
@@ -140,8 +145,6 @@ jobs:
               -tAc "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$schema'" \
               | grep -q 1 || { echo "schema $schema missing"; exit 1; }
           done
-
-      - uses: Swatinem/rust-cache@v2
 
       # The #[ignore]d sqlx tests hit the database directly at the same URL
       # docker-compose uses. geo-engine covers the PostGIS queries;
@@ -177,3 +180,42 @@ jobs:
       # contributor uses to run the stack locally. Does not build images.
       - name: Validate compose file
         run: docker compose config --quiet
+
+  manifests:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSLo kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar xzf kustomize.tar.gz && sudo mv kustomize /usr/local/bin/
+          curl -sSLo kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz && sudo mv kubeconform /usr/local/bin/
+
+      # Building proves the overlays and patches resolve. Validating proves
+      # the API server would actually accept the result — a manifest can
+      # build cleanly and still be rejected for a bad field.
+      - name: Build and validate overlays
+        run: |
+          for overlay in dev prod; do
+            echo "--- $overlay"
+            kustomize build "infra/k8s/overlays/$overlay" > "/tmp/$overlay.yaml"
+            kubeconform -strict -summary -kubernetes-version 1.29.0 "/tmp/$overlay.yaml"
+          done
+
+      # The secret template holds placeholder values. If it ever ends up in
+      # the kustomization, `kubectl apply` would create a Secret whose
+      # contents are the literal string REPLACE_ME, and services would fail
+      # to authenticate against Postgres in a very confusing way.
+      - name: Secret template must not be applied
+        run: |
+          for overlay in dev prod; do
+            if grep -q "REPLACE_ME" "/tmp/$overlay.yaml"; then
+              echo "secrets.example.yaml leaked into the $overlay build"
+              exit 1
+            fi
+          done

@@ -1,0 +1,122 @@
+# Horizontal scaling and disruption budgets.
+#
+# HPAs cover only the request-driven workloads. The consumers are
+# deliberately excluded: their parallelism is capped by topic partitions,
+# so an autoscaler would happily add replicas that hold no partition
+# assignment and do nothing. Scaling those means repartitioning first.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: atlas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # 70% leaves headroom for the spike between the metric being
+          # observed and new pods becoming ready.
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # React quickly: this is the front door.
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      # Retreat slowly. Traffic that dips for a minute and returns should
+      # not cost a full scale-down-then-up cycle.
+      stabilizationWindowSeconds: 300
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: geo-engine
+  namespace: atlas
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: geo-engine
+  minReplicas: 2
+  # Capped well below the gateway's ceiling on purpose: every replica holds
+  # a Postgres pool of 20, so 10 replicas is already 200 connections. Raise
+  # this only together with the database's max_connections, or put PgBouncer
+  # in front.
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+# Disruption budgets. These bound voluntary disruption only — node drains,
+# cluster upgrades — not crashes.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: atlas
+spec:
+  # Expressed as a minimum rather than maxUnavailable so it stays correct
+  # as the HPA changes the replica count.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: auth-service
+  namespace: atlas
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: auth-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: geo-engine
+  namespace: atlas
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: geo-engine
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-service
+  namespace: atlas
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: control-plane
+  namespace: atlas
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane

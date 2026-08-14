@@ -32,8 +32,46 @@ In active development. The repository currently contains:
 * Local development environment via `docker-compose`
 * CI on GitHub Actions: fmt + clippy + tests for Rust, Gradle build for Kotlin, and a job that applies every migration against a real PostGIS instance
 
-Still to come: the language SDKs (TypeScript, Dart, Rust), Terraform for
-GCP/GKE, and Kubernetes manifests beyond the Kafka topic definitions.
+* A **migration runner** (`atlas-migrate`) with recorded history, so schema changes can be applied to a running database
+* **Kubernetes manifests** for the whole platform — Deployments, HPAs, PDBs, NetworkPolicies, Ingress — validated in CI against real API schemas
+
+Still to come: the language SDKs (TypeScript, Dart, Rust) and Terraform for
+GCP/GKE provisioning.
+
+### Database migrations
+
+Migrations used to be mounted into the Postgres container at
+`/docker-entrypoint-initdb.d`. That directory runs **only on a database's
+first boot**, which meant a new migration was silently skipped by anyone
+who already had a volume, nothing recorded what had been applied, and there
+was no way at all to change the schema of a running database.
+
+`tools/migrator` replaces it. It records applied versions in
+`_sqlx_migrations`, applies only what is pending, wraps each migration in a
+transaction, and verifies checksums so an applied file cannot be edited out
+from under a deployed environment.
+
+```bash
+docker compose up -d          # migrator runs first; services wait for it
+docker compose run --rm migrator status   # applied vs pending
+```
+
+Services never migrate on startup — with several replicas booting at once
+that is a race, and a failed migration would crash-loop every pod instead
+of failing one Job. In Kubernetes it is a `Job`, and each service blocks on
+an init container running `atlas-migrate status --check`.
+
+**If you have a volume from before this landed**, its schema came from the
+old initdb path and has no recorded history. Adopt it once:
+
+```bash
+docker compose run --rm migrator baseline --through 40 \
+    --i-understand-this-skips-sql
+```
+
+`--through` has no default on purpose: the tool cannot verify which
+migrations a legacy database actually received, and guessing would silently
+skip real schema changes. Or just start clean with `docker compose down -v`.
 
 ### Building from source
 
@@ -262,9 +300,14 @@ atlas/
 │   ├── location-consumer/ # Location retention (Rust)
 │   ├── safety-consumer/   # Geofence alerts (Rust)
 │   └── fare-consumer/     # Settlement (Kotlin)
+├── tools/
+│   └── migrator/       # Schema migration runner (Rust)
 ├── .github/workflows/  # CI
 ├── infra/
-│   ├── k8s/            # Kubernetes manifests including Kafka topics
+│   ├── k8s/
+│   │   ├── base/       # Deployments, HPAs, PDBs, NetworkPolicies, Ingress
+│   │   ├── overlays/   # dev (1 replica) and prod (zone spread)
+│   │   └── kafka-topics.yaml  # Strimzi KafkaTopic CRDs
 │   └── terraform/      # GCP and GKE provisioning (planned)
 ├── atlas.toml.example  # Sample developer config
 └── docker-compose.yml  # Local dev environment

@@ -1,0 +1,66 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: atlas
+
+resources:
+  - ../../base
+
+# One of everything. A dev cluster is for finding out whether the manifests
+# work, not for absorbing load.
+replicas:
+  - name: gateway
+    count: 1
+  - name: control-plane
+    count: 1
+  - name: auth-service
+    count: 1
+  - name: geo-engine
+    count: 1
+  - name: payments-service
+    count: 1
+  - name: location-consumer
+    count: 1
+  - name: safety-consumer
+    count: 1
+  - name: fare-consumer
+    count: 1
+
+patches:
+  # HPAs would immediately scale the single replicas back up, so they are
+  # removed rather than retuned.
+  - target:
+      kind: HorizontalPodAutoscaler
+    patch: |
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: ignored
+
+  # With one replica per service, a PDB of minAvailable: 1 would block
+  # every node drain forever.
+  - target:
+      kind: PodDisruptionBudget
+    patch: |
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: ignored
+
+  # Dev clusters are small; do not let requests hold nodes hostage.
+  - target:
+      kind: Deployment
+      name: gateway
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
+  - target:
+      kind: Deployment
+      name: geo-engine
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m

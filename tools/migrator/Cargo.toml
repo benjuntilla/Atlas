@@ -1,0 +1,18 @@
+[package]
+name = "atlas-migrator"
+version = "0.1.0"
+edition = "2021"
+description = "Applies Atlas SQL migrations in order and records what ran. Runs as a Kubernetes Job before each rollout."
+license = "MIT"
+
+[[bin]]
+name = "atlas-migrate"
+path = "src/main.rs"
+
+[dependencies]
+sqlx = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

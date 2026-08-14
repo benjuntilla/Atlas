@@ -1,0 +1,66 @@
+# Schema migration Job.
+#
+# Runs to completion before any service that touches Postgres is allowed to
+# start. Services do not migrate on boot: with several replicas rolling at
+# once that is a race, and a failed migration would crash-loop every pod
+# instead of failing one Job and leaving the previous version serving.
+#
+# A Job's `spec.template` is immutable, so this cannot simply be re-applied
+# after the image tag changes — the API server rejects it. The deploy
+# pipeline has to delete the Job first; see the note in kustomization.yaml
+# for the exact sequence. Deleting a completed Job loses nothing, because
+# the migration history lives in Postgres.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: atlas-migrate
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: atlas-migrate
+    app.kubernetes.io/component: schema
+spec:
+  # Migrations are transactional and the runner takes an advisory lock, so
+  # a retry is safe. Four attempts covers a database that is still electing
+  # a primary; beyond that something is actually wrong and the rollout
+  # should stop rather than keep hammering.
+  backoffLimit: 4
+  # Do not leave completed Jobs around forever.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: atlas-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: atlas/migrator:latest
+          args: ["run"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: atlas-secrets
+                  key: database-url
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: RUST_LOG
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

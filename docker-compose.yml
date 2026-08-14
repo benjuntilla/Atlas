@@ -1,18 +1,18 @@
-# Local Atlas dev environment.
-#
-# Phase 1 brings up infrastructure only (Postgres + Kafka). Service stanzas
-# below are commented out and get uncommented as each phase lands:
-#   Phase 2 -> auth-service
-#   Phase 3 -> geo-engine
-#   Phase 4 -> payments-service
-#   Phase 5 -> gateway
-#   Phase 6 -> consumers
-#   Phase 7 -> control-plane
+# Local Atlas dev environment. Every phase is now wired up:
+#   infrastructure  -> postgres, zookeeper, kafka
+#   schema          -> migrator (runs once, then exits)
+#   services        -> auth-service, geo-engine, payments-service,
+#                      gateway (public edge), control-plane (CLI backend)
+#   consumers       -> location, safety, fare
 #
 # Usage:
-#   docker compose up -d postgres kafka      # Phase 1
-#   docker compose logs -f postgres          # tail migrations applying
+#   docker compose up -d                     # the whole platform
+#   docker compose logs -f migrator          # watch the schema apply
+#   docker compose run --rm migrator status  # what is applied vs pending
 #   psql postgres://atlas:atlas_dev@localhost:5432/atlas -c '\dn'
+#
+# Ports published to the host: 8080 gateway, 8081 control-plane,
+# 5432 postgres, 9092 kafka, 50051-50053 gRPC, 9091+ metrics.
 
 services:
   postgres:
@@ -24,15 +24,40 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Files in /docker-entrypoint-initdb.d run in lexical order on first
-      # boot only. The 00xx_ prefix on each migration controls ordering.
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      # migrations/ is deliberately NOT mounted at /docker-entrypoint-initdb.d
+      # any more. That directory runs on a database's FIRST BOOT ONLY, so any
+      # migration added later was silently skipped by everyone who already had
+      # a volume, and there was no way at all to apply a schema change to a
+      # running database. The `migrator` service below owns schema now.
       - atlas_pg_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # --- Phase 8: migrations ---------------------------------------------------
+  # Runs to completion and exits. Every service that touches Postgres waits
+  # for it with `condition: service_completed_successfully`, so no service
+  # ever starts against a half-migrated schema.
+  #
+  # If you have a volume from before this existed, its schema was applied by
+  # the old initdb path and has no migration history. Adopt it once with:
+  #
+  #   docker compose run --rm migrator baseline --through 40 \
+  #       --i-understand-this-skips-sql
+  #
+  # Or just start clean: docker compose down -v
+  migrator:
+    build:
+      context: .
+      dockerfile: tools/migrator/Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      RUST_LOG: info
+    restart: "no"
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
@@ -71,6 +96,7 @@ services:
     ports: ["50051:50051"]
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
@@ -91,6 +117,7 @@ services:
       - "9091:9090"  # host 9091 -> container 9090 to avoid a clash later
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
@@ -113,6 +140,7 @@ services:
       - "8053:8053"
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
@@ -168,6 +196,7 @@ services:
       - "9094:9090"
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
@@ -188,6 +217,7 @@ services:
       - "9095:9090"
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
@@ -208,6 +238,7 @@ services:
       - "8054:8054"
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
       payments-service: { condition: service_started }
     environment:
@@ -237,6 +268,7 @@ services:
       - "9096:9090"  # host 9096 -> container 9090; 9090-9095 are taken
     depends_on:
       postgres: { condition: service_healthy }
+      migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
       HTTP_ADDR: 0.0.0.0:8081

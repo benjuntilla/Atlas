@@ -1,0 +1,266 @@
+# The three Kafka consumers.
+#
+# No Services: these have no inbound API. They expose a metrics port for
+# scraping and nothing else, so they are addressed by pod annotation rather
+# than by a ClusterIP.
+#
+# Replica counts are capped by topic partitions, not by CPU. Every topic is
+# created with 3 partitions (see kafka-topics.yaml), so a fourth replica in
+# the same consumer group would sit idle holding no assignment. That is why
+# none of these carry an HPA — scaling them means repartitioning first.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: location-consumer
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: location-consumer
+    app.kubernetes.io/component: consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: location-consumer
+  strategy:
+    # Recreate rather than RollingUpdate: overlapping old and new pods in
+    # one consumer group triggers a rebalance on the way in and another on
+    # the way out. For a background worker with no availability
+    # requirement, one clean handover beats two rebalances.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: location-consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-schema
+          image: atlas/migrator:latest
+          args: ["status", "--check"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: location-consumer
+          image: atlas/location-consumer:latest
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: METRICS_ADDR
+              value: "0.0.0.0:9090"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: KAFKA_BROKERS }
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: RUST_LOG }
+          # These consumers serve /metrics and nothing else, so that is the
+          # liveness signal: if the axum server answers, the process is up
+          # and its runtime is scheduling.
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 20
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      # Long enough to commit offsets and leave the group cleanly, so the
+      # next rebalance does not wait on a session timeout.
+      terminationGracePeriodSeconds: 45
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: safety-consumer
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: safety-consumer
+    app.kubernetes.io/component: consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: safety-consumer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: safety-consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-schema
+          image: atlas/migrator:latest
+          args: ["status", "--check"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: safety-consumer
+          image: atlas/safety-consumer:latest
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: METRICS_ADDR
+              value: "0.0.0.0:9090"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: KAFKA_BROKERS }
+            - name: KAFKA_TOPIC_SAFETY_ALERTS
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: KAFKA_TOPIC_SAFETY_ALERTS
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: RUST_LOG }
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 20
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      terminationGracePeriodSeconds: 45
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fare-consumer
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: fare-consumer
+    app.kubernetes.io/component: consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fare-consumer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fare-consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8054"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-schema
+          image: atlas/migrator:latest
+          args: ["status", "--check"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: fare-consumer
+          image: atlas/fare-consumer:latest
+          ports:
+            - name: http
+              containerPort: 8054
+          env:
+            - name: HTTP_PORT
+              value: "8054"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: KAFKA_BROKERS }
+            - name: KAFKA_TOPIC_FARE_EVENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: KAFKA_TOPIC_FARE_EVENTS
+            - name: PAYMENTS_SERVICE_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: PAYMENTS_SERVICE_ADDR
+          # This one has a real /healthz, unlike the two Rust consumers.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 45

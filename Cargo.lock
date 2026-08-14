@@ -236,6 +236,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-migrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "atlas-safety-consumer"
 version = "0.1.0"
 dependencies = [

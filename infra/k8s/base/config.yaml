@@ -1,0 +1,26 @@
+# Non-secret configuration shared across services.
+#
+# Anything with a credential in it lives in a Secret instead — see
+# secrets.example.yaml. DATABASE_URL is a Secret because it carries the
+# password inline; the Kafka bootstrap and the service addresses are not
+# sensitive.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: atlas-config
+  namespace: atlas
+data:
+  KAFKA_BROKERS: "atlas-kafka-bootstrap.atlas.svc.cluster.local:9092"
+
+  # In-cluster service addresses. The gateway and control plane dial these.
+  AUTH_SERVICE_ADDR: "http://auth-service.atlas.svc.cluster.local:50051"
+  GEO_ENGINE_ADDR: "http://geo-engine.atlas.svc.cluster.local:50052"
+  PAYMENTS_SERVICE_ADDR: "http://payments-service.atlas.svc.cluster.local:50053"
+  GATEWAY_METRICS_URL: "http://gateway.atlas.svc.cluster.local:9090/metrics"
+
+  KAFKA_TOPIC_LOCATION_UPDATES: "atlas.location.updates"
+  KAFKA_TOPIC_FARE_EVENTS: "atlas.fare.events"
+  KAFKA_TOPIC_SAFETY_ALERTS: "atlas.safety.alerts"
+
+  # JSON to stdout; the cluster's log agent picks it up.
+  RUST_LOG: "info"
