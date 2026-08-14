@@ -93,7 +93,9 @@ services:
       # once the protobuf-gradle-plugin started reading from $rootDir/proto.
       context: .
       dockerfile: services/auth-service/Dockerfile
-    ports: ["50051:50051"]
+    ports:
+      - "50051:50051"
+      - "8051:8051"   # /metrics + /healthz; never publish this in prod
     depends_on:
       postgres: { condition: service_healthy }
       migrator: { condition: service_completed_successfully }
@@ -103,6 +105,7 @@ services:
       KAFKA_BROKERS: kafka:29092
       JWT_SECRET: dev_secret_change_in_prod_dev_secret_change_in_prod
       GRPC_PORT: "50051"
+      HTTP_PORT: "8051"
 
   # --- Phase 3: geo-engine (Rust) -------------------------------------------
   geo-engine:

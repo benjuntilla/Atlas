@@ -10,6 +10,9 @@ import io.atlas.auth.db.ExposedSessionRepository
 import io.atlas.auth.db.ExposedUserRepository
 import io.atlas.auth.grpc.AuthGrpcService
 import io.atlas.auth.grpc.HealthCheck
+import io.atlas.auth.http.MicrometerAuthMetrics
+import io.atlas.auth.http.newPrometheusRegistry
+import io.atlas.auth.http.startHttpServer
 import io.atlas.auth.kafka.AuthTokenProducer
 import io.atlas.auth.kafka.TokenEventConsumer
 import io.grpc.ServerBuilder
@@ -32,8 +35,8 @@ private val LOG = LoggerFactory.getLogger("io.atlas.auth.App")
 fun main() {
     val config = EnvConfig.fromEnv()
     LOG.info(
-        "starting auth-service: grpcPort={} dbUrl={} kafkaBrokers={}",
-        config.grpcPort, config.databaseUrl, config.kafkaBrokers,
+        "starting auth-service: grpcPort={} httpPort={} dbUrl={} kafkaBrokers={}",
+        config.grpcPort, config.httpPort, config.databaseUrl, config.kafkaBrokers,
     )
 
     DatabaseBootstrap.connect(
@@ -55,8 +58,11 @@ fun main() {
         clock = Clock.systemUTC(),
     )
 
+    val registry = newPrometheusRegistry()
+    val metrics = MicrometerAuthMetrics(registry)
+
     val cache = TokenValidationCache()
-    val producer = AuthTokenProducer.build(config.kafkaBrokers)
+    val producer = AuthTokenProducer.build(config.kafkaBrokers, metrics)
     val consumer = TokenEventConsumer(
         bootstrapServers = config.kafkaBrokers,
         cache = cache,
@@ -68,6 +74,7 @@ fun main() {
         signer = signer,
         cache = cache,
         publisher = producer,
+        metrics = metrics,
     )
 
     val health = HealthCheck()
@@ -77,11 +84,15 @@ fun main() {
         .addService(health.service)
         .build()
 
+    val httpServer = startHttpServer(config.httpPort, registry)
     server.start()
     health.setServing()
     health.setServing("atlas.auth.AuthService")
     consumer.start()
-    LOG.info("started gRPC server on :{}", config.grpcPort)
+    LOG.info(
+        "started gRPC server on :{} and HTTP server on :{}",
+        config.grpcPort, config.httpPort,
+    )
 
     Runtime.getRuntime().addShutdownHook(Thread {
         LOG.info("shutdown signal received, draining")
@@ -94,6 +105,7 @@ fun main() {
         }
         consumer.close()
         producer.close()
+        httpServer.stop(1_000, 5_000)
         LOG.info("auth-service stopped")
     })
 

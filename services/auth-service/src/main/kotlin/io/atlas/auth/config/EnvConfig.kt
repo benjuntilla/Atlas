@@ -15,6 +15,8 @@ data class EnvConfig(
     val jwtSecret: String,
     val kafkaBrokers: String,
     val grpcPort: Int,
+    /** Prometheus scrape + /healthz. Never expose this publicly. */
+    val httpPort: Int,
     val tokenLifetimeSeconds: Long,
 ) {
     companion object {
@@ -30,6 +32,7 @@ data class EnvConfig(
                     ?: "dev_secret_change_in_prod_dev_secret_change_in_prod",
                 kafkaBrokers = env["KAFKA_BROKERS"] ?: "localhost:9092",
                 grpcPort = env["GRPC_PORT"]?.toInt() ?: 50051,
+                httpPort = env["HTTP_PORT"]?.toInt() ?: 8051,
                 tokenLifetimeSeconds = env["TOKEN_LIFETIME_SECONDS"]?.toLong() ?: 3600,
             )
         }

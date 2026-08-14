@@ -17,6 +17,9 @@ spec:
     - name: grpc
       port: 50051
       targetPort: grpc
+    - name: http
+      port: 8051
+      targetPort: http
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,6 +38,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: auth-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8051"
+        prometheus.io/path: "/metrics"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -66,9 +73,13 @@ spec:
           ports:
             - name: grpc
               containerPort: 50051
+            - name: http
+              containerPort: 8051
           env:
             - name: GRPC_PORT
               value: "50051"
+            - name: HTTP_PORT
+              value: "8051"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: atlas-secrets, key: database-url }

@@ -11,6 +11,7 @@ import atlas.auth.TokenResponse
 import atlas.auth.ValidateTokenRequest
 import io.atlas.auth.cache.TokenValidationCache
 import io.atlas.auth.core.AuthError
+import io.atlas.auth.core.AuthMetrics
 import io.atlas.auth.core.AuthService
 import io.atlas.auth.core.SessionRepository
 import io.atlas.auth.core.SignedToken
@@ -44,6 +45,7 @@ class AuthGrpcService(
     private val signer: JwtSigner,
     private val cache: TokenValidationCache,
     private val publisher: AuthTokenEventPublisher,
+    private val metrics: AuthMetrics = AuthMetrics.NOOP,
     private val clock: Clock = Clock.systemUTC(),
 ) : AuthServiceGrpcKt.AuthServiceCoroutineImplBase() {
 
@@ -53,6 +55,7 @@ class AuthGrpcService(
         } catch (e: AuthError) {
             throw e.toGrpcStatusException()
         }
+        metrics.userRegistered()
         return RegisterResponse.newBuilder().setUserId(userId.toString()).build()
     }
 
@@ -65,8 +68,11 @@ class AuthGrpcService(
                 lastLng = if (request.lat == 0.0 && request.lng == 0.0) null else request.lng,
             )
         } catch (e: AuthError) {
+            metrics.authenticationFailed(e.metricReason())
             throw e.toGrpcStatusException()
         }
+        metrics.authenticated()
+        metrics.tokenIssued()
         publishIssued(signed)
         return signed.toResponse()
     }
@@ -86,28 +92,41 @@ class AuthGrpcService(
         } catch (e: AuthError) {
             throw e.toGrpcStatusException()
         }
+        metrics.tokenIssued()
         publishIssued(signed)
         return signed.toResponse()
     }
 
     override suspend fun validateToken(request: ValidateTokenRequest): ProtoTokenClaims {
         val token = request.token
-        cache.get(token)?.let { return it.toProto() }
+        cache.get(token)?.let {
+            // Served without touching Postgres. The hit/miss ratio is the
+            // early-warning signal for database load on this path.
+            metrics.tokenValidated(cacheHit = true)
+            return it.toProto()
+        }
 
         val domainClaims = try {
             signer.verify(token)
         } catch (e: AuthError) {
+            metrics.tokenRejected(e.metricReason())
             throw e.toGrpcStatusException()
         }
 
         val session = sessions.findById(domainClaims.sessionId)
-            ?: throw Status.UNAUTHENTICATED.withDescription("session not found").asException()
+            ?: run {
+                metrics.tokenRejected("session_not_found")
+                throw Status.UNAUTHENTICATED.withDescription("session not found").asException()
+            }
         if (session.revoked) {
+            metrics.tokenRejected("session_revoked")
             throw Status.PERMISSION_DENIED.withDescription("session revoked").asException()
         }
         if (clock.instant().isAfter(session.expiresAt)) {
+            metrics.tokenRejected("session_expired")
             throw Status.UNAUTHENTICATED.withDescription("session expired").asException()
         }
+        metrics.tokenValidated(cacheHit = false)
 
         cache.putWithHash(token, domainClaims, sha256Hex(token))
         return domainClaims.toProto()
@@ -124,6 +143,7 @@ class AuthGrpcService(
         }
         sessions.revoke(domainClaims.sessionId)
         cache.evict(token)
+        metrics.tokenRevoked()
         try {
             publisher.publishRevoked(domainClaims, token)
         } catch (e: Exception) {
@@ -170,6 +190,22 @@ private fun DomainTokenClaims.toProto(): ProtoTokenClaims =
         .setLastLat(lastLat ?: 0.0)
         .setLastLng(lastLng ?: 0.0)
         .build()
+
+/**
+ * A low-cardinality label for metrics. Deliberately the error KIND and never
+ * `message`, which interpolates the email address or a token reason and would
+ * mint an unbounded number of Prometheus time series — as well as putting user
+ * data into a metrics endpoint.
+ */
+private fun AuthError.metricReason(): String = when (this) {
+    is AuthError.EmailAlreadyExists -> "email_exists"
+    is AuthError.InvalidEmail -> "invalid_email"
+    is AuthError.WeakPassword -> "weak_password"
+    is AuthError.InvalidCredentials -> "invalid_credentials"
+    is AuthError.TokenInvalid -> "token_invalid"
+    is AuthError.SessionRevoked -> "session_revoked"
+    is AuthError.SessionExpired -> "session_expired"
+}
 
 private fun AuthError.toGrpcStatusException(): StatusException = when (this) {
     is AuthError.EmailAlreadyExists -> Status.ALREADY_EXISTS.withDescription(message).asException()

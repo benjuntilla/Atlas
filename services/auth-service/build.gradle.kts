@@ -105,6 +105,12 @@ dependencies {
     implementation(libs.kafka.clients)
     implementation(libs.caffeine)
 
+    // Phase 8: /metrics. auth-service was the only service exposing no
+    // metrics at all, on the busiest path in the platform.
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.micrometer.registry.prometheus)
+
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.test)
