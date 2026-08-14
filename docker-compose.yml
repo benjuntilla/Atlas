@@ -220,17 +220,40 @@ services:
       HTTP_PORT: "8054"
 
   # --- Phase 7: control-plane (Rust/Axum) -----------------------------------
-  # Backend the developer CLI and dashboard talk to: signup, project
-  # provisioning, API keys, usage stats, log streaming.
-  # control-plane:
-  #   build: ./services/control-plane
-  #   ports: ["8081:8081"]
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #     kafka: { condition: service_started }
-  #   environment:
-  #     DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
-  #     KAFKA_BROKERS: kafka:29092
+  # Backend the developer CLI and dashboard talk to: account bootstrap,
+  # project provisioning, API keys, status, and the audit trail.
+  #
+  # 8081 is not arbitrary: cli/src/api.rs defaults to
+  # http://localhost:8081/v1, so `atlas deploy --live` finds this with no
+  # --base-url flag.
+  #
+  # Build context is the repo root (Cargo workspace member).
+  control-plane:
+    build:
+      context: .
+      dockerfile: services/control-plane/Dockerfile
+    ports:
+      - "8081:8081"
+      - "9096:9090"  # host 9096 -> container 9090; 9090-9095 are taken
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8081
+      METRICS_ADDR: 0.0.0.0:9090
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      # Probed by `atlas status`. These are gRPC health checks, so the
+      # addresses are the services' gRPC ports, not their HTTP ones.
+      AUTH_SERVICE_ADDR: http://auth-service:50051
+      GEO_ENGINE_ADDR: http://geo-engine:50052
+      PAYMENTS_SERVICE_ADDR: http://payments-service:50053
+      # `events` has no gRPC health service; its health is a TCP connect
+      # against the broker.
+      KAFKA_BROKERS: kafka:29092
+      # Real request counts and latency quantiles come from the gateway's
+      # Prometheus endpoint — the only place per-request data exists.
+      GATEWAY_METRICS_URL: http://gateway:9090/metrics
+      RUST_LOG: info,atlas_control_plane=debug
 
 volumes:
   atlas_pg_data:

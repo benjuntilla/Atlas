@@ -16,7 +16,7 @@ members = [
     "consumers/location-consumer",
     "consumers/safety-consumer",
     # Phase 7
-    # "services/control-plane",
+    "services/control-plane",
 ]
 
 # Shared dependency versions. Member crates inherit via `workspace = true`.
@@ -41,6 +41,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 anyhow = "1"
+# API-key digests in the control plane. SHA-256 is the right primitive for a
+# high-entropy random secret — unlike a password, there is nothing to brute
+# force, so a slow KDF would only make every authenticated request slower.
+sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.22"

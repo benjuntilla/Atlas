@@ -135,7 +135,7 @@ jobs:
           PGPASSWORD: atlas_dev
         run: |
           psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas -c '\dn'
-          for schema in auth geo payments; do
+          for schema in auth geo payments control; do
             psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas \
               -tAc "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$schema'" \
               | grep -q 1 || { echo "schema $schema missing"; exit 1; }
@@ -151,6 +151,7 @@ jobs:
         run: |
           cargo test -p atlas-geo-engine -- --include-ignored
           cargo test -p atlas-safety-consumer -- --include-ignored
+          cargo test -p atlas-control-plane -- --include-ignored
 
       - uses: actions/setup-java@v4
         with:

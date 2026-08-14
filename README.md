@@ -25,14 +25,15 @@ In active development. The repository currently contains:
 * Three backend services: **auth** (Kotlin), **geo** (Rust), **payments** (Kotlin)
 * An **API gateway** (Rust/Axum) that terminates public HTTP, validates JWTs, and fans out to all three over gRPC
 * Three **Kafka consumers**: location (retention), safety (geofence alerts), fare (settlement)
+* A **control plane** (Rust/Axum) backing the CLI: accounts, project provisioning, API keys, live status, and an audit trail
 * gRPC contracts for every internal service (`proto/`)
 * Kafka event schemas (`proto/events.proto`)
 * Per-schema SQL migrations including PostGIS extensions
 * Local development environment via `docker-compose`
 * CI on GitHub Actions: fmt + clippy + tests for Rust, Gradle build for Kotlin, and a job that applies every migration against a real PostGIS instance
 
-Still to come: the control plane the CLI's `--live` mode talks to
-(Phase 7), and the language SDKs.
+Still to come: the language SDKs (TypeScript, Dart, Rust), Terraform for
+GCP/GKE, and Kubernetes manifests beyond the Kafka topic definitions.
 
 ### Building from source
 
@@ -88,7 +89,52 @@ atlas logs auth   # tail logs for a given service
 atlas keys list   # manage API keys
 ```
 
-The CLI defaults to an in-memory mock transport so it is fully usable while the control plane is being built. Pass `--live` once the backend ships.
+The CLI still defaults to an in-memory mock transport, so it works with no
+backend at all. Pass `--live` to talk to a real control plane.
+
+### Going live
+
+The control plane runs on 8081, which is the CLI's default base URL. Start
+it, then mint the account key that `atlas.toml` needs — this is the one
+bootstrap step, because every other route requires a key and `atlas deploy`
+cannot create the account that would hold one:
+
+```bash
+docker compose up -d postgres control-plane
+
+curl -sX POST http://localhost:8081/v1/accounts \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com"}'
+# => {"account_id":"...","api_key":"atl_dev_...","prefix":"atl_dev_...", ...}
+```
+
+Paste that `api_key` into `atlas.toml` as `project.api_key` — it is shown
+once and is not recoverable — then:
+
+```bash
+atlas deploy --live      # creates the project; idempotent on re-run
+atlas status --live      # live gRPC health probes + real gateway metrics
+atlas keys create ci --expiry 90d --live
+atlas logs --live        # the project's audit trail
+```
+
+`POST /v1/accounts` is the only unauthenticated write in the platform and
+has no email verification or rate limit. Keep the control plane on a
+private network until it does.
+
+### What `atlas status` actually measures
+
+`healthy` is a live probe on every call — a gRPC `Health/Check` against
+auth, geo, and payments, and a TCP connect to Kafka for `events`. Nothing
+is cached, so a service that dies is `DOWN` on the next invocation.
+
+The three numeric columns are parsed from the gateway's Prometheus
+endpoint, which is the only place per-request data exists. Two honest
+caveats: `requests_24h` is really "since the gateway process started"
+(a true 24-hour window needs a time-series database to difference the
+counter, which is Prometheus' job, not this service's), and `events` has
+no gateway routes so its counters are always zero — only its health means
+anything.
 
 ## HTTP API
 
@@ -208,10 +254,14 @@ atlas/
 ├── migrations/         # Numbered SQL files, applied in order
 ├── services/
 │   ├── gateway/        # Public REST edge (Rust/Axum)
+│   ├── control-plane/  # Projects, API keys, status (Rust/Axum)
 │   ├── auth-service/   # Identity and JWTs (Kotlin)
 │   ├── geo-engine/     # PostGIS queries (Rust)
 │   └── payments-service/ # Wallets and transactions (Kotlin)
-├── consumers/          # Kafka consumers (planned)
+├── consumers/
+│   ├── location-consumer/ # Location retention (Rust)
+│   ├── safety-consumer/   # Geofence alerts (Rust)
+│   └── fare-consumer/     # Settlement (Kotlin)
 ├── .github/workflows/  # CI
 ├── infra/
 │   ├── k8s/            # Kubernetes manifests including Kafka topics
