@@ -24,14 +24,15 @@ In active development. The repository currently contains:
 * A working Rust CLI (`atlas`) with config parsing, validation, deploy, status, logs, and key management
 * Three backend services: **auth** (Kotlin), **geo** (Rust), **payments** (Kotlin)
 * An **API gateway** (Rust/Axum) that terminates public HTTP, validates JWTs, and fans out to all three over gRPC
+* Three **Kafka consumers**: location (retention), safety (geofence alerts), fare (settlement)
 * gRPC contracts for every internal service (`proto/`)
 * Kafka event schemas (`proto/events.proto`)
 * Per-schema SQL migrations including PostGIS extensions
 * Local development environment via `docker-compose`
 * CI on GitHub Actions: fmt + clippy + tests for Rust, Gradle build for Kotlin, and a job that applies every migration against a real PostGIS instance
 
-Still to come: the Kafka consumers (Phase 6), the control plane the CLI's
-`--live` mode talks to (Phase 7), and the language SDKs.
+Still to come: the control plane the CLI's `--live` mode talks to
+(Phase 7), and the language SDKs.
 
 ### Building from source
 
@@ -130,6 +131,42 @@ Four RPCs are deliberately unrouted: `auth.IssueToken` and
 a bare `transaction_id` with no ownership signal the gateway could check.
 Settlement is meant to be driven by the Phase 6 fare-consumer reacting to
 ride lifecycle events, not by a client call.
+
+## Event flow
+
+Synchronous calls go through the gateway; everything asynchronous goes
+through Kafka. Each topic has exactly one producer.
+
+| Topic | Produced by | Consumed by | What the consumer does |
+|---|---|---|---|
+| `atlas.location.updates` | geo-engine | location-consumer | Enforces the 24h retention window on `geo.locations` |
+| | | safety-consumer | Diffs geofence membership and emits crossings |
+| `atlas.safety.alerts` | safety-consumer | *(developer's app)* | Geofence entry/exit, for the app to act on |
+| `atlas.fare.events` | payments (outbox) | fare-consumer | Settles on `RIDE_COMPLETED`, refunds on `RIDE_CANCELLED` |
+| `atlas.auth.tokens` | auth-service | auth-service | Cache invalidation fanout on revocation |
+| `atlas.elo.recompute` | — | — | Not yet wired; see below |
+
+Two things are worth knowing about this table.
+
+**Settlement is event-driven, not an API call.** `POST
+/v1/payments/transactions` creates a pending transaction and payments
+writes a `RIDE_ACCEPTED` event through its outbox. The money moves later,
+when the application publishes `RIDE_COMPLETED` or `RIDE_CANCELLED` and
+fare-consumer calls `SettleTransaction` / `RefundTransaction`. This is why
+the gateway exposes no settle endpoint — see the note in the HTTP API
+section.
+
+**fare-consumer ignores payments' own events.** Payments publishes
+`TRANSACTION_SETTLED` and `TRANSACTION_REFUNDED` onto the same topic
+fare-consumer reads. Those are acknowledgements, not instructions; acting
+on them would settle in response to having settled, forever. They are
+recorded in the audit log and nothing else.
+
+`atlas.elo.recompute` and the `geo.safety_votes` table are still
+unconnected: there is no API for a user to cast a safety vote, so nothing
+produces the event and the ELO scores in `safety_ratings` never change.
+`GetNearby` therefore returns the neutral 1500.0 for every user. That is a
+known gap, not an oversight in this phase.
 
 ## Architecture
 

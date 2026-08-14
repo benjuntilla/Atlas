@@ -143,10 +143,29 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The #[ignore]d sqlx tests in geo-engine hit the database directly at
-      # the same URL docker-compose uses.
+      # The #[ignore]d sqlx tests hit the database directly at the same URL
+      # docker-compose uses. geo-engine covers the PostGIS queries;
+      # safety-consumer covers geofence transition detection against real
+      # geography maths, which is where a units bug would hide.
       - name: Run DB-backed integration tests
-        run: cargo test -p atlas-geo-engine -- --include-ignored
+        run: |
+          cargo test -p atlas-geo-engine -- --include-ignored
+          cargo test -p atlas-safety-consumer -- --include-ignored
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # fare-consumer's Exposed adapters skip themselves without this env
+      # var. They cover the custom jsonb column type and the ON CONFLICT
+      # dedup, neither of which any amount of compiling would validate.
+      - name: Run fare-consumer database tests
+        env:
+          ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: ./gradlew :consumers:fare-consumer:test --no-daemon
 
   compose:
     name: docker-compose syntax

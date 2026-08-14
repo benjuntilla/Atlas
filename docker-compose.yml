@@ -151,6 +151,74 @@ services:
       PAYMENTS_SERVICE_ADDR: http://payments-service:50053
       RUST_LOG: info,atlas_gateway=debug
 
+  # --- Phase 6: consumers ---------------------------------------------------
+  # None of these are published to the host except their metrics ports.
+  # They are pure background workers: no inbound API, no gRPC server.
+  #
+  # All three use service_started rather than service_healthy for Kafka
+  # because each retries internally — a consumer that cannot reach the
+  # broker yet logs and retries rather than dying.
+
+  # Owns the geo.locations retention window (migration 0020's TTL).
+  location-consumer:
+    build:
+      context: .
+      dockerfile: consumers/location-consumer/Dockerfile
+    ports:
+      - "9094:9090"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC_LOCATION_UPDATES: atlas.location.updates
+      CONSUMER_GROUP: atlas-location-consumer
+      METRICS_ADDR: 0.0.0.0:9090
+      SWEEP_INTERVAL_SECONDS: "300"
+      RUST_LOG: info,atlas_location_consumer=debug
+
+  # Turns location pings into geofence entry/exit alerts. This is the only
+  # producer of atlas.safety.alerts.
+  safety-consumer:
+    build:
+      context: .
+      dockerfile: consumers/safety-consumer/Dockerfile
+    ports:
+      - "9095:9090"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC_LOCATION_UPDATES: atlas.location.updates
+      KAFKA_TOPIC_SAFETY_ALERTS: atlas.safety.alerts
+      CONSUMER_GROUP: atlas-safety-consumer
+      METRICS_ADDR: 0.0.0.0:9090
+      RUST_LOG: info,atlas_safety_consumer=debug
+
+  # Drives settlement off ride lifecycle events. Depends on payments-service
+  # because it settles and refunds over gRPC rather than touching wallets.
+  fare-consumer:
+    build:
+      context: .
+      dockerfile: consumers/fare-consumer/Dockerfile
+    ports:
+      - "8054:8054"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_started }
+      payments-service: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_TOPIC_FARE_EVENTS: atlas.fare.events
+      CONSUMER_GROUP: atlas-fare-consumer
+      # host:port, not a URL — this is a gRPC channel target.
+      PAYMENTS_SERVICE_TARGET: payments-service:50053
+      HTTP_PORT: "8054"
+
   # --- Phase 7: control-plane (Rust/Axum) -----------------------------------
   # Backend the developer CLI and dashboard talk to: signup, project
   # provisioning, API keys, usage stats, log streaming.
