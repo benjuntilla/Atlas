@@ -44,6 +44,7 @@ impl From<GeofenceTuple> for GeofenceRow {
 
 pub async fn create(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     label: &str,
     center_lat: f64,
@@ -54,8 +55,9 @@ pub async fn create(
     // between "unlabeled" and "labeled with empty string" stays clean.
     let row: GeofenceTuple = sqlx::query_as(
         r#"
-        INSERT INTO geo.geofences (user_id, label, center, radius_m)
+        INSERT INTO geo.geofences (project_id, user_id, label, center, radius_m)
         VALUES (
+            $6,
             $1,
             NULLIF($2, ''),
             ST_SetSRID(ST_MakePoint($3, $4), 4326),
@@ -72,6 +74,7 @@ pub async fn create(
     .bind(center_lng)
     .bind(center_lat)
     .bind(radius_m)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
@@ -80,6 +83,7 @@ pub async fn create(
 
 pub async fn list(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     active_only: bool,
 ) -> Result<Vec<GeofenceRow>, sqlx::Error> {
@@ -90,13 +94,15 @@ pub async fn list(
                ST_X(center::geometry) AS center_lng,
                radius_m, active, created_at
         FROM geo.geofences
-        WHERE user_id = $1
+        WHERE project_id = $3
+          AND user_id = $1
           AND ($2 = FALSE OR active = TRUE)
         ORDER BY created_at DESC
         "#,
     )
     .bind(user_id)
     .bind(active_only)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -104,16 +110,37 @@ pub async fn list(
 }
 
 /// Soft-delete. Returns true if a row was found and deactivated.
-pub async fn deactivate(pool: &PgPool, geofence_id: Uuid) -> Result<bool, sqlx::Error> {
+///
+/// # Scoped by owner, not just by id
+///
+/// This used to be `WHERE id = $1` and nothing else, which made it an
+/// IDOR: a geofence id is a UUID, but ids leak — they are returned by
+/// create, echoed in list responses, and carried in geofence alerts — and
+/// anyone holding one could delete a fence belonging to someone else.
+///
+/// Requiring (project, user, id) means a fence you do not own is
+/// indistinguishable from one that does not exist: the UPDATE matches
+/// nothing and the caller gets `deleted: false` either way. Returning a
+/// distinct "not yours" would confirm the id is real.
+pub async fn deactivate(
+    pool: &PgPool,
+    project_id: Uuid,
+    user_id: Uuid,
+    geofence_id: Uuid,
+) -> Result<bool, sqlx::Error> {
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"
         UPDATE geo.geofences
         SET active = FALSE
         WHERE id = $1
+          AND project_id = $2
+          AND user_id = $3
         RETURNING id
         "#,
     )
     .bind(geofence_id)
+    .bind(project_id)
+    .bind(user_id)
     .fetch_optional(pool)
     .await?;
     Ok(row.is_some())
@@ -127,6 +154,7 @@ pub async fn deactivate(pool: &PgPool, geofence_id: Uuid) -> Result<bool, sqlx::
 /// as containing every user.
 pub async fn check_membership(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     lat: f64,
     lng: f64,
@@ -135,7 +163,8 @@ pub async fn check_membership(
         r#"
         SELECT id
         FROM geo.geofences
-        WHERE user_id = $1
+        WHERE project_id = $4
+          AND user_id = $1
           AND active = TRUE
           AND ST_DWithin(
               center::geography,
@@ -147,6 +176,7 @@ pub async fn check_membership(
     .bind(user_id)
     .bind(lng)
     .bind(lat)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())

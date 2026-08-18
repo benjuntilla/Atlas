@@ -7,11 +7,16 @@
 
 use serde_json::json;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// Score one route candidate. The route is passed as `[{lat, lng}, ...]`
 /// and built into a LineString in SQL. Returns the average ELO; defaults
 /// to 1500.0 when no safety ratings are within 30m of the line.
-pub async fn score_route(pool: &PgPool, points: &[(f64, f64)]) -> Result<f64, sqlx::Error> {
+pub async fn score_route(
+    pool: &PgPool,
+    project_id: Uuid,
+    points: &[(f64, f64)],
+) -> Result<f64, sqlx::Error> {
     // Build the JSON payload up front so the SQL stays simple. ::float8
     // casts are critical — without them ST_MakePoint fails because
     // jsonb's ->> returns text.
@@ -40,13 +45,18 @@ pub async fn score_route(pool: &PgPool, points: &[(f64, f64)]) -> Result<f64, sq
         SELECT AVG(sr.elo_score)::float8 AS score
         FROM route_segment rs
         LEFT JOIN geo.safety_ratings sr
+            -- Scoped: a route's score must come from this tenant's own
+            -- safety data. Another customer's votes moving your route
+            -- choice is a leak in both directions.
+            ON sr.project_id = $2
             -- 30 is meters, so both sides are geography. On raw 4326
             -- geometry this would mean 30 degrees and average the ELO of
             -- every rating in a third of the planet.
-            ON ST_DWithin(sr.segment_geom::geography, rs.geom::geography, 30)
+           AND ST_DWithin(sr.segment_geom::geography, rs.geom::geography, 30)
         "#,
     )
     .bind(payload)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 

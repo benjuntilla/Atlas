@@ -14,6 +14,7 @@ use uuid::Uuid;
 /// column default in migration 0020.
 pub async fn insert_location(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     lat: f64,
     lng: f64,
@@ -21,8 +22,9 @@ pub async fn insert_location(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO geo.locations (user_id, position, recorded_at)
+        INSERT INTO geo.locations (project_id, user_id, position, recorded_at)
         VALUES (
+            $5,
             $1,
             ST_SetSRID(ST_MakePoint($2, $3), 4326),
             $4
@@ -35,6 +37,7 @@ pub async fn insert_location(
     .bind(lng)
     .bind(lat)
     .bind(recorded_at)
+    .bind(project_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -53,6 +56,19 @@ pub struct NearbyRow {
 /// safety score; defaults to 1500.0 (the ELO neutral score) when no
 /// nearby ratings exist.
 ///
+/// # Why the project filter is load-bearing here specifically
+///
+/// Most queries in Atlas reach a row through a user id, and user ids are
+/// UUIDs — so even unscoped, they could not accidentally return another
+/// tenant's data. This one is different: it searches by POSITION. Without
+/// `l.project_id = $6` it returns every Atlas user near that point no
+/// matter whose application asked, which is a cross-tenant read of people's
+/// locations. It was exactly that until this filter existed.
+///
+/// The safety_ratings join is scoped for the same reason: the scores are
+/// derived from one tenant's users' votes, and letting another tenant's
+/// votes move the number would leak behaviour across the boundary.
+///
 /// # Why every spatial predicate casts to `::geography`
 ///
 /// `geo.locations.position` is `GEOMETRY(Point, 4326)`. On a *geometry*,
@@ -63,6 +79,7 @@ pub struct NearbyRow {
 /// **meters**, which is what the `_m` suffix has always claimed.
 pub async fn nearby(
     pool: &PgPool,
+    project_id: Uuid,
     lat: f64,
     lng: f64,
     radius_m: f64,
@@ -82,9 +99,11 @@ pub async fn nearby(
             COALESCE(AVG(sr.elo_score), 1500.0) AS safety_score
         FROM geo.locations l
         LEFT JOIN geo.safety_ratings sr
-            ON ST_DWithin(sr.segment_geom::geography, l.position::geography, 200)
+            ON sr.project_id = $6
+           AND ST_DWithin(sr.segment_geom::geography, l.position::geography, 200)
         WHERE
-            ST_DWithin(
+            l.project_id = $6
+            AND ST_DWithin(
                 l.position::geography,
                 ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
                 $3
@@ -101,6 +120,7 @@ pub async fn nearby(
     .bind(radius_m)
     .bind(requester_user_id)
     .bind(limit)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 

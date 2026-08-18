@@ -56,6 +56,11 @@ async fn update_location(
         .geo
         .clone()
         .update_location(Request::new(LocationUpdate {
+            // Both identities come from the request's credentials.
+            // `AuthUser::project_id` was already checked to match the key
+            // the request arrived with, so using it here cannot disagree
+            // with the tenant layer.
+            project_id: user.project_id,
             user_id: user.user_id,
             lat: body.lat,
             lng: body.lng,
@@ -107,6 +112,7 @@ async fn nearby(
         .geo
         .clone()
         .get_nearby(Request::new(NearbyRequest {
+            project_id: user.project_id,
             requester_user_id: user.user_id,
             lat: params.lat,
             lng: params.lng,
@@ -199,6 +205,7 @@ async fn score_route(
         .geo
         .clone()
         .score_route(Request::new(RouteScoreRequest {
+            project_id: user.project_id,
             user_id: user.user_id,
             candidates: body
                 .candidates
@@ -283,6 +290,7 @@ async fn create_geofence(
         .geo
         .clone()
         .create_geofence(Request::new(CreateGeofenceRequest {
+            project_id: user.project_id,
             user_id: user.user_id,
             label: body.label.unwrap_or_default(),
             center_lat: body.center_lat,
@@ -312,7 +320,7 @@ async fn list_geofences(
     user: AuthUser,
     Query(params): Query<ListGeofenceParams>,
 ) -> Result<Json<ListGeofencesOut>, ApiError> {
-    let resp = list_for_user(&state, &user.user_id, params.active_only).await?;
+    let resp = list_for_user(&state, &user.project_id, &user.user_id, params.active_only).await?;
     Ok(Json(ListGeofencesOut {
         geofences: resp.into_iter().map(Into::into).collect(),
     }))
@@ -320,46 +328,49 @@ async fn list_geofences(
 
 /// Delete (deactivate) one of the caller's geofences.
 ///
-/// # Ownership is enforced here, and that is a stopgap
+/// # Ownership is enforced in SQL now, not here
 ///
-/// `geo.DeleteGeofence` takes only a `geofence_id` — the RPC and the
-/// underlying `queries::geofences::deactivate` SQL have no notion of who
-/// is asking. Forwarding a raw id would therefore let any authenticated
-/// caller deactivate any other user's geofence by guessing or leaking a
-/// UUID. So before deleting, we list the caller's own geofences and
-/// require the id to be among them, returning 404 (not 403) when it is
-/// not, so the endpoint does not confirm that an id exists.
+/// This used to list the caller's geofences first and require the id to
+/// be among them, because `DeleteGeofenceRequest` carried a bare
+/// geofence_id and the UPDATE had nothing to scope by. That closed the
+/// hole for gateway traffic only, cost an extra round trip, and was
+/// TOCTOU-racy.
 ///
-/// This closes the hole for traffic arriving through the gateway, which
-/// is the only path from the public internet. It is not a complete fix:
-/// the check is TOCTOU-racy, it costs an extra round trip, and anything
-/// speaking gRPC to geo-engine directly still bypasses it. The durable
-/// fix is a `user_id` field on `DeleteGeofenceRequest` scoped into the
-/// UPDATE's WHERE clause, which is a proto change to the Phase 3
-/// contract and is left for that service to make.
+/// `DeleteGeofenceRequest` now carries user_id and project_id, and
+/// `queries::geofences::deactivate` scopes the UPDATE by all three, so
+/// the check holds for every caller including anything speaking gRPC to
+/// geo-engine directly. The pre-check is gone.
+///
+/// A fence that is not yours matches nothing, so `deleted` comes back
+/// false and this returns 404 — the same answer as an id that never
+/// existed, which is the point. Re-deleting your OWN already-deactivated
+/// fence still matches the row, so it stays idempotent.
 async fn delete_geofence(
     State(state): State<AppState>,
     user: AuthUser,
     Path(geofence_id): Path<String>,
 ) -> Result<Json<DeleteOut>, ApiError> {
-    // active_only = false: an already-deactivated fence still belongs to
-    // its owner, and deleting it again must stay idempotent for them
-    // rather than falling through to the not-found branch.
-    let owned = list_for_user(&state, &user.user_id, false).await?;
-    if !owned.iter().any(|g| g.id == geofence_id) {
+    let resp = state
+        .geo
+        .clone()
+        // user_id and project_id are what make this a scoped delete
+        // rather than an IDOR — see queries::geofences::deactivate.
+        .delete_geofence(Request::new(DeleteGeofenceRequest {
+            geofence_id,
+            user_id: user.user_id,
+            project_id: user.project_id,
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("geo", s))?
+        .into_inner();
+
+    if !resp.deleted {
+        // Not yours, or never existed — deliberately the same answer.
         return Err(ApiError::upstream(
             "geo",
             tonic::Status::not_found("geofence not found"),
         ));
     }
-
-    let resp = state
-        .geo
-        .clone()
-        .delete_geofence(Request::new(DeleteGeofenceRequest { geofence_id }))
-        .await
-        .map_err(|s| ApiError::upstream("geo", s))?
-        .into_inner();
 
     Ok(Json(DeleteOut {
         deleted: resp.deleted,
@@ -373,6 +384,7 @@ pub struct DeleteOut {
 
 async fn list_for_user(
     state: &AppState,
+    project_id: &str,
     user_id: &str,
     active_only: bool,
 ) -> Result<Vec<crate::pb::geo::Geofence>, ApiError> {
@@ -380,6 +392,7 @@ async fn list_for_user(
         .geo
         .clone()
         .list_geofences(Request::new(ListGeofencesRequest {
+            project_id: project_id.to_string(),
             user_id: user_id.to_string(),
             active_only,
         }))
@@ -412,6 +425,7 @@ async fn check_geofences(
         .geo
         .clone()
         .trigger_geofence_check(Request::new(GeofenceCheckRequest {
+            project_id: user.project_id,
             user_id: user.user_id,
             lat: body.lat,
             lng: body.lng,

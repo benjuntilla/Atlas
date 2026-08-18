@@ -16,11 +16,16 @@ service GeoEngine {
   rpc DeleteGeofence(DeleteGeofenceRequest) returns (DeleteGeofenceResponse);
 }
 
+// `project_id` on every request below is injected by the gateway from the
+// caller's `X-Atlas-Key`, exactly as `user_id` is injected from the JWT.
+// No REST DTO has a field for either, so a caller can name neither — it
+// can only present credentials that name them.
 message LocationUpdate {
   string user_id = 1;
   double lat = 2;
   double lng = 3;
   int64  recorded_at = 4;
+  string project_id = 5;
 }
 
 message LocationAck { bool ok = 1; }
@@ -33,6 +38,7 @@ message NearbyRequest {
   string role = 5; // "driver" | "walker"
   // 0 means default 20, max 100. Enforced in the service layer.
   uint32 limit = 6;
+  string project_id = 7;
 }
 
 message NearbyUser {
@@ -48,6 +54,7 @@ message NearbyResponse { repeated NearbyUser users = 1; }
 message RouteScoreRequest {
   string user_id = 1;
   repeated RouteCandidate candidates = 2;
+  string project_id = 3;
 }
 
 message RouteCandidate {
@@ -72,6 +79,7 @@ message GeofenceCheckRequest {
   string user_id = 1;
   double lat = 2;
   double lng = 3;
+  string project_id = 4;
 }
 
 message GeofenceCheckResponse {
@@ -98,11 +106,13 @@ message CreateGeofenceRequest {
   double center_lat = 3;
   double center_lng = 4;
   double radius_m = 5;
+  string project_id = 6;
 }
 
 message ListGeofencesRequest {
   string user_id = 1;
   bool active_only = 2;
+  string project_id = 3;
 }
 
 message ListGeofencesResponse {
@@ -111,6 +121,15 @@ message ListGeofencesResponse {
 
 message DeleteGeofenceRequest {
   string geofence_id = 1;
+  // Both required, and both injected rather than client-supplied.
+  //
+  // This message used to carry a bare geofence_id with no owner at all,
+  // which meant anyone who could guess or observe a fence id could delete
+  // someone else's — the deletion query had nothing to check it against.
+  // Scoping the UPDATE by (project_id, user_id, id) makes another user's
+  // fence indistinguishable from one that does not exist.
+  string user_id = 2;
+  string project_id = 3;
 }
 
 message DeleteGeofenceResponse {
