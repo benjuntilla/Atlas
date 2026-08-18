@@ -1,4 +1,4 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server, type IncomingMessage } from 'node:http';
 import { AtlasClient, AtlasError, AtlasConnectionError } from '../src/index.js';
@@ -16,35 +16,43 @@ interface Recorded {
   body: string;
 }
 
-let server: Server;
-let baseUrl: string;
 let recorded: Recorded[] = [];
 /** Queue of responses; each request pops one. Falls back to 200 {}. */
 let responses: Array<{ status: number; body: string; contentType?: string }> = [];
 
-before(async () => {
-  server = createServer((req: IncomingMessage, res) => {
-    const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => {
-      recorded.push({
-        method: req.method ?? '',
-        url: req.url ?? '',
-        headers: req.headers,
-        body: Buffer.concat(chunks).toString(),
-      });
-      const next = responses.shift() ?? { status: 200, body: '{}' };
-      res.writeHead(next.status, {
-        'content-type': next.contentType ?? 'application/json',
-      });
-      res.end(next.body);
+const server: Server = createServer((req: IncomingMessage, res) => {
+  const chunks: Buffer[] = [];
+  req.on('data', (c: Buffer) => chunks.push(c));
+  req.on('end', () => {
+    recorded.push({
+      method: req.method ?? '',
+      url: req.url ?? '',
+      headers: req.headers,
+      body: Buffer.concat(chunks).toString(),
     });
+    const next = responses.shift() ?? { status: 200, body: '{}' };
+    res.writeHead(next.status, {
+      'content-type': next.contentType ?? 'application/json',
+    });
+    res.end(next.body);
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const addr = server.address();
-  if (typeof addr === 'string' || addr === null) throw new Error('no port');
-  baseUrl = `http://127.0.0.1:${addr.port}`;
 });
+
+// Started with top-level await rather than a root `before` hook.
+//
+// On the oldest Node this package supports (20.3), a root-level `before`
+// does not reliably complete before the tests inside top-level
+// `describe` blocks begin, so `baseUrl` was still undefined when the
+// first client was constructed — the whole suite failed on 20.3 while
+// passing on 22. Module evaluation, by contrast, is guaranteed to finish
+// before any test runs on every supported version.
+await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+const addr = server.address();
+if (typeof addr === 'string' || addr === null) throw new Error('no port');
+const baseUrl = `http://127.0.0.1:${addr.port}`;
+// A listening socket would otherwise keep the process alive if `after`
+// never runs; the suite should exit on its own either way.
+server.unref();
 
 after(async () => {
   await new Promise<void>((resolve, reject) =>

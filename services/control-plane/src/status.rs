@@ -130,14 +130,12 @@ pub fn parse_gateway_metrics(text: &str) -> HashMap<&'static str, ServiceUsage> 
                     entry.errors += count;
                 }
             }
-            "atlas_gateway_request_duration_ms" => {
-                // The summary emits one line per quantile; we want 0.95.
-                // Several routes map to one namespace, so take the worst
-                // rather than averaging quantiles, which is not a
-                // mathematically meaningful operation anyway.
-                if labels.get("quantile") == Some(&"0.95") && value > entry.p95_ms {
-                    entry.p95_ms = value;
-                }
+            // The summary emits one line per quantile; we want 0.95.
+            // Several routes map to one namespace, so take the worst
+            // rather than averaging quantiles, which is not a
+            // mathematically meaningful operation anyway.
+            "atlas_gateway_request_duration_ms" if labels.get("quantile") == Some(&"0.95") => {
+                entry.p95_ms = entry.p95_ms.max(value);
             }
             _ => {}
         }
