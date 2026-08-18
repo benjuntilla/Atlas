@@ -48,6 +48,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let state = state::AppState::connect(&cfg).context("building upstream channels")?;
+    // Expired project-key entries would otherwise accumulate for as long
+    // as the process lives, and the negative half of that cache is sized
+    // by whoever is sending bad keys.
+    state.projects.spawn_gc();
+    info!(
+        project_cache_ttl_secs = cfg.project_cache_ttl.as_secs(),
+        "project key resolution ready (this is also the key revocation window)"
+    );
+
     let app = routes::router(state, limiters);
 
     let listener = tokio::net::TcpListener::bind(cfg.http_addr)

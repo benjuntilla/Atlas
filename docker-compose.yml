@@ -180,6 +180,12 @@ services:
       AUTH_SERVICE_ADDR: http://auth-service:50051
       GEO_ENGINE_ADDR: http://geo-engine:50052
       PAYMENTS_SERVICE_ADDR: http://payments-service:50053
+      # Read-only: resolves the X-Atlas-Key header to a project. The pool
+      # is lazy like the gRPC channels, so the gateway still starts and
+      # answers health probes with Postgres down.
+      DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
+      # Also the key revocation window — see services/gateway/src/tenant.rs.
+      PROJECT_CACHE_TTL_SECONDS: "30"
       # No proxy in front locally, so the socket peer address is the client.
       TRUSTED_PROXY_HOPS: "0"
       RUST_LOG: info,atlas_gateway=debug

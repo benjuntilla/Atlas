@@ -160,6 +160,7 @@ jobs:
           cargo test -p atlas-safety-consumer -- --include-ignored
           cargo test -p atlas-control-plane -- --include-ignored
           cargo test -p atlas-migrator -- --include-ignored
+          cargo test -p atlas-gateway -- --include-ignored
 
       - uses: actions/setup-java@v4
         with:

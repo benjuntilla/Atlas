@@ -65,9 +65,12 @@ function reset(): void {
   responses = [];
 }
 
+const TEST_PROJECT_KEY = 'atl_test_0123456789abcdef0123456789abcdef';
+
 function client(opts: { token?: string; maxRetries?: number } = {}): AtlasClient {
   return new AtlasClient({
     baseUrl,
+    projectKey: TEST_PROJECT_KEY,
     maxRetries: opts.maxRetries ?? 0,
     timeoutMs: 2_000,
     ...(opts.token ? { token: opts.token } : {}),
@@ -295,6 +298,7 @@ describe('errors', () => {
     const c = new AtlasClient({
       // Port nothing listens on.
       baseUrl: 'http://127.0.0.1:59987',
+      projectKey: TEST_PROJECT_KEY,
       maxRetries: 0,
       timeoutMs: 1_000,
     });
@@ -373,5 +377,43 @@ describe('retries', () => {
       client({ token: 't', maxRetries: 2 }).geo.updateLocation({ lat: 1, lng: 2 }),
     );
     assert.equal(recorded.length, 1);
+  });
+});
+
+describe('project key', () => {
+  test('is sent on every request, authenticated or not', async () => {
+    reset();
+    await client().auth.register({ email: 'a@b.dev', password: 'pw' });
+    reset();
+    await client({ token: 't' }).payments.wallet();
+
+    // Both calls above recorded one request each; check the second, which
+    // also carries a bearer token, to prove the two headers coexist.
+    assert.equal(recorded[0]?.headers['x-atlas-key'], TEST_PROJECT_KEY);
+    assert.equal(recorded[0]?.headers['authorization'], 'Bearer t');
+  });
+
+  test('a missing project key fails at construction, not at call time', () => {
+    assert.throws(
+      // Cast because the type already forbids this; the runtime check is
+      // for JavaScript callers and for a key read from an unset env var.
+      () => new AtlasClient({ baseUrl, projectKey: '' } as never),
+      /projectKey/,
+    );
+  });
+
+  test('caller headers cannot override the project key', async () => {
+    // Otherwise a stray `headers` option would silently send requests as
+    // some other project, which is the sort of thing that only shows up
+    // in production.
+    reset();
+    const c = new AtlasClient({
+      baseUrl,
+      projectKey: TEST_PROJECT_KEY,
+      maxRetries: 0,
+      headers: { 'X-Atlas-Key': 'atl_live_ffffffffffffffffffffffffffffffff' },
+    });
+    await c.auth.register({ email: 'a@b.dev', password: 'pw' });
+    assert.equal(recorded[0]?.headers['x-atlas-key'], TEST_PROJECT_KEY);
   });
 });

@@ -26,6 +26,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 governor = { workspace = true }
 sha2 = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+atlas-keys = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -36,3 +39,5 @@ prost-build = { workspace = true }
 # binding a port. No upstream gRPC servers required for the paths that
 # reject before fanout (bad JSON, missing bearer, malformed coordinates).
 tower = { workspace = true, features = ["util"] }
+# tenant_test.rs mints keys with real expiry timestamps.
+chrono = { workspace = true }

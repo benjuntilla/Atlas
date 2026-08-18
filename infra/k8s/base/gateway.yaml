@@ -82,6 +82,18 @@ spec:
                 configMapKeyRef:
                   name: atlas-config
                   key: PAYMENTS_SERVICE_ADDR
+            # Read-only access to control.api_keys, to resolve the
+            # X-Atlas-Key header to a project. The pool is lazy, so a
+            # Postgres outage does not stop this pod from becoming ready —
+            # it makes individual /v1 requests fail with 503, which is
+            # accurate.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            # How long a resolved key stays cached, and therefore how long
+            # `atlas keys revoke` takes to bite.
+            - name: PROJECT_CACHE_TTL_SECONDS
+              value: "30"
             # Exactly one proxy sits in front (ingress-nginx), so the
             # client address is the last X-Forwarded-For entry. Leaving this
             # at 0 would key every unauthenticated request by the ingress

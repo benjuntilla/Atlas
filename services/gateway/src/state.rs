@@ -11,18 +11,28 @@
 //! and tonic's generated clients need `&mut self`, so handlers clone the
 //! client out of state rather than locking it.
 
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::config::Config;
 use crate::pb::auth::auth_service_client::AuthServiceClient;
 use crate::pb::geo::geo_engine_client::GeoEngineClient;
 use crate::pb::payments::payments_service_client::PaymentsServiceClient;
+use crate::tenant::ProjectCache;
 
 #[derive(Clone)]
 pub struct AppState {
     pub auth: AuthServiceClient<Channel>,
     pub geo: GeoEngineClient<Channel>,
     pub payments: PaymentsServiceClient<Channel>,
+    /// Read-only pool for resolving project keys. Lazy for the same reason
+    /// the gRPC channels are: the gateway must bind its port and answer
+    /// health probes whether or not Postgres is up yet. A request that
+    /// needs it while it is down fails with 503, which is the truth.
+    pub pool: PgPool,
+    pub projects: Arc<ProjectCache>,
 }
 
 impl AppState {
@@ -31,6 +41,11 @@ impl AppState {
             auth: AuthServiceClient::new(endpoint(&cfg.auth_addr, cfg)?),
             geo: GeoEngineClient::new(endpoint(&cfg.geo_addr, cfg)?),
             payments: PaymentsServiceClient::new(endpoint(&cfg.payments_addr, cfg)?),
+            pool: PgPoolOptions::new()
+                .max_connections(cfg.database_pool_size)
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect_lazy(&cfg.database_url)?,
+            projects: ProjectCache::new(cfg.project_cache_ttl),
         })
     }
 }

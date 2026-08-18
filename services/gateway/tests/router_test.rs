@@ -18,12 +18,14 @@
 use atlas_gateway::{
     config::Config,
     ratelimit::{Limiters, RateLimitConfig},
-    routes,
+    routes::{self, TenantSource},
     state::AppState,
+    tenant::{Tenant, KEY_HEADER},
 };
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 /// Ports in the IANA ephemeral range that no Atlas service uses.
 fn test_config() -> Config {
@@ -35,8 +37,28 @@ fn test_config() -> Config {
         payments_addr: "http://127.0.0.1:59153".to_string(),
         upstream_timeout: std::time::Duration::from_millis(250),
         upstream_connect_timeout: std::time::Duration::from_millis(250),
+        // Nothing here connects: the pool is lazy, and every test below
+        // uses a fixed tenant rather than resolving a key. A test that
+        // reached Postgres would fail with 503, not pass quietly.
+        database_url: "postgres://nobody@127.0.0.1:59154/nothing".to_string(),
+        database_pool_size: 1,
+        project_cache_ttl: std::time::Duration::from_secs(30),
         // Unused: these tests build limiters explicitly via app_with_limits.
         rate_limit: RateLimitConfig::default(),
+    }
+}
+
+/// A resolved tenant, as the layer would have produced from a valid key.
+/// These tests are about what the gateway decides before it talks to
+/// anything; tenant RESOLUTION is covered by unit tests in `tenant.rs` and
+/// by the database-backed tests in `tests/tenant_test.rs`.
+fn test_tenant() -> Tenant {
+    Tenant {
+        project_id: Uuid::nil(),
+        account_id: Uuid::nil(),
+        environment: "development".to_string(),
+        key_id: Uuid::nil(),
+        key_prefix: "atl_dev_test".to_string(),
     }
 }
 
@@ -54,6 +76,25 @@ fn app_with_limits(limits: RateLimitConfig) -> axum::Router {
     routes::router_without_peer(
         AppState::connect(&test_config()).expect("lazy channels always build"),
         Limiters::new(limits),
+        TenantSource::Fixed(Box::new(test_tenant())),
+    )
+}
+
+/// A router with the REAL tenant layer — `X-Atlas-Key` is resolved rather
+/// than injected.
+///
+/// This differs from `routes::router()` only in how the rate limiter reads
+/// the peer address, because `oneshot` supplies no `ConnectInfo`. The
+/// tenant path is identical, which is what these tests are about.
+fn key_resolving_app() -> axum::Router {
+    routes::router_without_peer(
+        AppState::connect(&test_config()).expect("lazy channels always build"),
+        Limiters::new(RateLimitConfig {
+            default_per_minute: 10_000,
+            auth_per_minute: 10_000,
+            ..RateLimitConfig::default()
+        }),
+        TenantSource::Key,
     )
 }
 
@@ -332,5 +373,114 @@ async fn health_probes_survive_an_exhausted_default_quota() {
         res.status(),
         StatusCode::OK,
         "liveness must not be rate limited"
+    );
+}
+
+// --- the tenant boundary --------------------------------------------------
+
+/// A `/v1` request carrying no project key must be refused.
+///
+/// This is the test that keeps `TenantSource::Fixed` honest. Every other
+/// test in this file injects a tenant so it can exercise routing without a
+/// database; without this one, a change that dropped the real layer would
+/// leave the whole file passing while the gateway served unscoped traffic.
+#[tokio::test]
+async fn a_request_without_a_project_key_is_refused() {
+    let res = key_resolving_app()
+        .oneshot(get("/v1/geo/nearby?lat=0&lng=0&radius_m=100"))
+        .await
+        .expect("router responds");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a request with no project key must not reach a handler"
+    );
+}
+
+/// Public routes are public to END USERS, not to the internet: registering
+/// a user means registering them into someone's project, so the key is
+/// required there too.
+#[tokio::test]
+async fn even_the_public_auth_routes_require_a_project_key() {
+    for (uri, body) in [
+        (
+            "/v1/auth/register",
+            r#"{"email":"a@b.dev","password":"hunter2"}"#,
+        ),
+        (
+            "/v1/auth/login",
+            r#"{"email":"a@b.dev","password":"hunter2"}"#,
+        ),
+    ] {
+        let res = key_resolving_app()
+            .oneshot(post_json(uri, body))
+            .await
+            .expect("router responds");
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+/// A malformed key must be rejected inside the gateway rather than
+/// becoming a database lookup. Reaching the (unreachable) database would
+/// surface as 503, so a 401 here proves the shape check ran first.
+#[tokio::test]
+async fn a_malformed_project_key_is_rejected_without_a_lookup() {
+    for key in [
+        "hunter2",
+        "atl_live_short",
+        "zzz_live_0123456789abcdef0123456789abcdef",
+    ] {
+        let req = Request::builder()
+            .uri("/v1/auth/me")
+            .header(KEY_HEADER, key)
+            .body(Body::empty())
+            .unwrap();
+        let res = key_resolving_app()
+            .oneshot(req)
+            .await
+            .expect("router responds");
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "key {key:?} must be rejected before the database"
+        );
+    }
+}
+
+/// Health probes carry no customer key and must answer regardless — a
+/// liveness check that 401s would have Kubernetes restart every pod.
+#[tokio::test]
+async fn health_probes_do_not_require_a_project_key() {
+    let app = key_resolving_app();
+    assert_eq!(
+        app.clone().oneshot(get("/healthz")).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(get("/readyz")).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+/// The tenant check runs before the user check, so a request missing both
+/// credentials reports the outer one. Asserting the ORDER matters: if it
+/// flipped, an anonymous caller could learn whether a project key was
+/// valid by watching which error came back.
+#[tokio::test]
+async fn the_project_key_is_checked_before_the_user_token() {
+    let res = key_resolving_app()
+        .oneshot(get("/v1/auth/me"))
+        .await
+        .expect("router responds");
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(KEY_HEADER),
+        "expected the project-key error, got {message:?}"
     );
 }

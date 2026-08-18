@@ -148,6 +148,7 @@ name = "atlas-control-plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atlas-keys",
  "axum 0.7.9",
  "chrono",
  "governor",
@@ -174,7 +175,9 @@ name = "atlas-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atlas-keys",
  "axum 0.7.9",
+ "chrono",
  "governor",
  "metrics",
  "metrics-exporter-prometheus",
@@ -183,6 +186,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "tonic",
@@ -191,6 +195,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -217,6 +222,14 @@ dependencies = [
  "tonic-health",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atlas-keys"
+version = "0.1.0"
+dependencies = [
+ "sha2",
  "uuid",
 ]
 

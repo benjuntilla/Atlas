@@ -14,7 +14,10 @@ npm install @atlas/sdk
 ```ts
 import { AtlasClient, AtlasError } from '@atlas/sdk';
 
-const atlas = new AtlasClient({ baseUrl: 'https://api.atlas.dev' });
+const atlas = new AtlasClient({
+  baseUrl: 'https://api.atlas.dev',
+  projectKey: process.env.ATLAS_KEY!, // atl_live_… from `atlas keys create`
+});
 
 await atlas.auth.register({ email: 'rider@example.com', password: 'hunter2!' });
 await atlas.auth.login({ email: 'rider@example.com', password: 'hunter2!' });
@@ -105,13 +108,32 @@ transaction. Settlement runs server-side off ride lifecycle events.
 ```ts
 new AtlasClient({
   baseUrl: 'https://api.atlas.dev',
-  token: 'atl_...',   // resume an existing session
+  projectKey: process.env.ATLAS_KEY!, // required
+  token: 'eyJ...',    // resume an existing session
   timeoutMs: 10_000,  // per request
   maxRetries: 2,      // safe requests only
   fetch: customFetch, // injectable, e.g. for tracing
   headers: { 'x-request-id': id },
 });
 ```
+
+## Two credentials
+
+Atlas requests carry two identities, and they answer different questions.
+
+| | What it says | Where it comes from | Where it lives |
+|---|---|---|---|
+| `projectKey` | which application is calling | `atlas keys create` | your server, in an env var |
+| `token` | which of your users is calling | `atlas.auth.login()` | per user, per session |
+
+Neither substitutes for the other, and both are sent on every call —
+including `register` and `login`, because creating a user means creating
+them in a project.
+
+**The project key is a server-side secret.** It is not a user credential:
+anyone holding it can act on your entire project, so it must not be
+shipped in a browser bundle or a mobile app. Keep this client on your
+backend and let your own API sit in front of it.
 
 ## Development
 

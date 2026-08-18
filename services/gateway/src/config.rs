@@ -25,6 +25,16 @@ pub struct Config {
     /// TCP connect timeout for a lazily-established upstream channel.
     pub upstream_connect_timeout: Duration,
 
+    /// Read-only connection to the control-plane database, used to resolve
+    /// a project key to its project. See `tenant.rs` for why the gateway
+    /// reads this table rather than calling the control plane.
+    pub database_url: String,
+    pub database_pool_size: u32,
+    /// How long a resolved (or rejected) project key stays cached. This is
+    /// also the revocation window: `atlas keys revoke` takes effect within
+    /// it, not instantly.
+    pub project_cache_ttl: Duration,
+
     /// Per-replica request limiting. See `ratelimit.rs` for what this does
     /// and does not protect.
     pub rate_limit: crate::ratelimit::RateLimitConfig,
@@ -43,6 +53,12 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:50053".to_string()),
             upstream_timeout: parse_secs("UPSTREAM_TIMEOUT_SECONDS", 10),
             upstream_connect_timeout: parse_secs("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 5),
+            database_url: env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://atlas:atlas_dev@localhost:5432/atlas".to_string()),
+            database_pool_size: parse_u32("DATABASE_POOL_SIZE", 8),
+            // 30s to match the token validation cache in auth-service, so
+            // the two credentials on a request go stale on the same clock.
+            project_cache_ttl: parse_secs("PROJECT_CACHE_TTL_SECONDS", 30),
             rate_limit: crate::ratelimit::RateLimitConfig {
                 default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 600),
                 auth_per_minute: parse_u32("RATE_LIMIT_AUTH_PER_MINUTE", 10),

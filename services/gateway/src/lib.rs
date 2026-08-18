@@ -19,6 +19,15 @@
 //! a client to populate. A caller cannot ask about, move money from, or
 //! write locations for anyone but themselves.
 //!
+//! # The tenant boundary
+//!
+//! Alongside the user identity there is a second, independent one: which
+//! customer's application is asking. That comes from the `X-Atlas-Key`
+//! header and is resolved in [`tenant`], which runs as a layer over every
+//! `/v1` route so a newly added route cannot be tenant-unaware by
+//! omission. As with `user_id`, no request DTO carries a project field —
+//! a caller cannot name a project, only present a key that names one.
+//!
 //! Two RPCs are intentionally unreachable from here, per the notes in
 //! proto/auth.proto and proto/payments.proto: `auth.IssueToken` (mints a
 //! token for an arbitrary user_id) and `payments.DrainOutbox` (an ops
@@ -31,6 +40,7 @@ pub mod metrics;
 pub mod ratelimit;
 pub mod routes;
 pub mod state;
+pub mod tenant;
 pub mod validate;
 
 /// Generated protobuf clients, keyed by proto package name.

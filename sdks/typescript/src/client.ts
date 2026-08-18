@@ -23,6 +23,16 @@ import type {
 export interface AtlasClientOptions {
   /** Gateway origin, e.g. https://api.atlas.dev. The /v1 prefix is added. */
   baseUrl: string;
+  /**
+   * Your Atlas project key, e.g. `atl_live_…`. Identifies which project
+   * the request belongs to and is sent on every call.
+   *
+   * This is a server-side secret. It is not a user credential and must
+   * not be shipped to a browser or a mobile app — anyone holding it can
+   * act on your whole project. Put it in an environment variable and keep
+   * this client on your backend.
+   */
+  projectKey: string;
   /** Existing bearer token. `login()` sets this for you. */
   token?: string;
   /** Per-request timeout. Default 10s, matching the gateway's own upstream deadline. */
@@ -37,12 +47,21 @@ export interface AtlasClientOptions {
  * Client for the Atlas gateway.
  *
  * ```ts
- * const atlas = new AtlasClient({ baseUrl: 'https://api.atlas.dev' });
+ * const atlas = new AtlasClient({
+ *   baseUrl: 'https://api.atlas.dev',
+ *   projectKey: process.env.ATLAS_KEY!,
+ * });
  * await atlas.auth.login({ email, password });   // token stored on the client
  * const { users } = await atlas.geo.nearby({ lat, lng, radiusM: 500 });
  * ```
  *
  * # Identity
+ *
+ * Two credentials, and they answer different questions. The `projectKey`
+ * says which application is calling — it is yours, it stays on your
+ * server, and it never changes between users. The bearer token says which
+ * of your users is calling, and `login()` obtains it. Neither substitutes
+ * for the other.
  *
  * No method takes a user id. The gateway derives it from the token on
  * every authenticated call, and its request bodies have no `user_id`
@@ -59,12 +78,28 @@ export class AtlasClient {
   readonly payments: PaymentsApi;
 
   constructor(opts: AtlasClientOptions) {
+    if (!opts.projectKey) {
+      // Fail here rather than letting every call come back 401. A missing
+      // key is a configuration mistake, and the stack trace from the
+      // constructor points at the line that has to change.
+      throw new Error('AtlasClient requires a projectKey (atl_live_… / atl_test_… / atl_dev_…)');
+    }
     this.http = new Http({
       baseUrl: opts.baseUrl,
       timeoutMs: opts.timeoutMs ?? 10_000,
       maxRetries: opts.maxRetries ?? 2,
       ...(opts.fetch ? { fetch: opts.fetch } : {}),
-      ...(opts.headers ? { headers: opts.headers } : {}),
+      headers: {
+        ...(opts.headers ?? {}),
+        // Last, so it wins. A caller-supplied `headers` map that happened
+        // to contain X-Atlas-Key would otherwise silently send every
+        // request as a different project — the kind of mistake that only
+        // surfaces once it is in production.
+        //
+        // Sent on every request, including register and login: creating a
+        // user means creating them in a project.
+        'X-Atlas-Key': opts.projectKey,
+      },
     });
     this.token = opts.token;
 
