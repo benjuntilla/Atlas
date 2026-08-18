@@ -24,6 +24,8 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+governor = { workspace = true }
+sha2 = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

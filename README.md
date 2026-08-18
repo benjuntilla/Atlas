@@ -157,9 +157,9 @@ atlas keys create ci --expiry 90d --live
 atlas logs --live        # the project's audit trail
 ```
 
-`POST /v1/accounts` is the only unauthenticated write in the platform and
-has no email verification or rate limit. Keep the control plane on a
-private network until it does.
+`POST /v1/accounts` is the only unauthenticated write in the platform. It
+is rate limited (3/min per client address by default) but still has no
+email verification, so anyone who can reach it can create accounts.
 
 ### What `atlas status` actually measures
 
@@ -276,6 +276,38 @@ unconnected: there is no API for a user to cast a safety vote, so nothing
 produces the event and the ELO scores in `safety_ratings` never change.
 `GetNearby` therefore returns the neutral 1500.0 for every user. That is a
 known gap, not an oversight in this phase.
+
+## Rate limiting
+
+The gateway and control plane both limit requests in-process. Credential
+endpoints get a much smaller quota than ordinary traffic, because those are
+the ones worth brute forcing:
+
+| Service | Endpoint | Default |
+|---|---|---|
+| gateway | `/v1/auth/login`, `/v1/auth/register` | 10/min per client |
+| gateway | everything else | 600/min per token |
+| control-plane | `POST /v1/accounts` | 3/min per client |
+| control-plane | everything else | 120/min per API key |
+
+Authenticated traffic is keyed by a digest of the bearer token rather than
+by IP: behind carrier-grade NAT or a corporate egress, thousands of real
+users share one address, and IP keying would throttle them together while
+doing nothing about one attacker rotating addresses. Health probes are
+never throttled — rate limiting a liveness probe turns a busy pod into a
+crash loop.
+
+**This is per-replica.** Three gateway pods at 600/min is 1800/min
+globally. A globally exact limit needs shared state on the hot path of
+every request; this is the layer that stops one client exhausting one
+replica, underneath the ingress limit which is the real global cap.
+
+**`TRUSTED_PROXY_HOPS` matters.** It defaults to `0`, meaning
+`X-Forwarded-For` is ignored entirely and the socket peer address is used.
+That is correct for direct exposure and safe by default: the header is
+client-supplied, and trusting its first entry lets anyone mint a fresh
+bucket per forged value. Behind a proxy, set it to the number of proxies
+you actually run — the Kubernetes manifests set `1` for ingress-nginx.
 
 ## SDK
 

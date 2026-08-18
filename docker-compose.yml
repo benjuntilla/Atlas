@@ -180,6 +180,8 @@ services:
       AUTH_SERVICE_ADDR: http://auth-service:50051
       GEO_ENGINE_ADDR: http://geo-engine:50052
       PAYMENTS_SERVICE_ADDR: http://payments-service:50053
+      # No proxy in front locally, so the socket peer address is the client.
+      TRUSTED_PROXY_HOPS: "0"
       RUST_LOG: info,atlas_gateway=debug
 
   # --- Phase 6: consumers ---------------------------------------------------
@@ -288,6 +290,7 @@ services:
       # Real request counts and latency quantiles come from the gateway's
       # Prometheus endpoint — the only place per-request data exists.
       GATEWAY_METRICS_URL: http://gateway:9090/metrics
+      TRUSTED_PROXY_HOPS: "0"
       RUST_LOG: info,atlas_control_plane=debug
 
 volumes:

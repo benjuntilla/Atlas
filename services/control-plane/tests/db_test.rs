@@ -11,7 +11,12 @@
 //! account and project name from a random UUID and asserts only within
 //! that scope.
 
-use atlas_control_plane::{config::Config, routes, state::AppState};
+use atlas_control_plane::{
+    config::Config,
+    ratelimit::{Limiters, RateLimitConfig},
+    routes,
+    state::AppState,
+};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
@@ -36,6 +41,7 @@ fn test_config() -> Config {
         gateway_metrics_url: "http://127.0.0.1:59445/metrics".to_string(),
         endpoint_template: "https://api.atlas.dev/v1/{name}".to_string(),
         probe_timeout: std::time::Duration::from_millis(120),
+        rate_limit: RateLimitConfig::default(),
     }
 }
 
@@ -59,7 +65,14 @@ impl Harness {
     }
 
     fn app(&self) -> axum::Router {
-        routes::router(self.state.clone())
+        routes::router_without_peer(
+            self.state.clone(),
+            Limiters::new(RateLimitConfig {
+                default_per_minute: 10_000,
+                signup_per_minute: 10_000,
+                ..RateLimitConfig::default()
+            }),
+        )
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
@@ -638,4 +651,49 @@ async fn logs_return_the_projects_audit_trail() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+// --- rate limiting ----------------------------------------------------------
+
+/// POST /v1/accounts is the only unauthenticated write in the platform and
+/// it mints an API key. Unthrottled, anyone reaching the port can create
+/// unlimited accounts and credentials.
+#[tokio::test]
+#[ignore]
+async fn account_creation_is_throttled() {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(DATABASE_URL)
+        .await
+        .expect("connect to local postgres");
+    let state = AppState::new(pool, test_config()).expect("state builds");
+
+    // Two signups allowed, third refused. All share the "unknown" address
+    // bucket because the test harness supplies no ConnectInfo.
+    let limiters = Limiters::new(RateLimitConfig {
+        signup_per_minute: 2,
+        default_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    });
+    // One shared limiter across all three requests — a fresh limiter per
+    // request would reset the quota and the test would prove nothing.
+    let app = || routes::router_without_peer(state.clone(), std::sync::Arc::clone(&limiters));
+
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        let email = format!("throttle-{}@atlas.dev", Uuid::new_v4());
+        let res = app()
+            .oneshot(post("/v1/accounts", json!({ "email": email }), None))
+            .await
+            .unwrap();
+        statuses.push(res.status());
+    }
+
+    assert_eq!(statuses[0], StatusCode::CREATED);
+    assert_eq!(statuses[1], StatusCode::CREATED);
+    assert_eq!(
+        statuses[2],
+        StatusCode::TOO_MANY_REQUESTS,
+        "third signup from one address must be refused"
+    );
 }

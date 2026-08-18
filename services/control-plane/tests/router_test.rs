@@ -11,7 +11,12 @@
 //! Everything that needs real rows lives in `db_test.rs`, behind
 //! `#[ignore]`.
 
-use atlas_control_plane::{config::Config, routes, state::AppState};
+use atlas_control_plane::{
+    config::Config,
+    ratelimit::{Limiters, RateLimitConfig},
+    routes,
+    state::AppState,
+};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use sqlx::postgres::PgPoolOptions;
@@ -32,6 +37,7 @@ fn test_config() -> Config {
         gateway_metrics_url: "http://127.0.0.1:59436/metrics".to_string(),
         endpoint_template: "https://api.atlas.dev/v1/{name}".to_string(),
         probe_timeout: std::time::Duration::from_millis(150),
+        rate_limit: RateLimitConfig::default(),
     }
 }
 
@@ -46,7 +52,16 @@ fn app() -> axum::Router {
         // Lazy: no connection is attempted until a query runs.
         .connect_lazy(&cfg.database_url)
         .expect("lazy pool always builds");
-    routes::router(AppState::new(pool, cfg).expect("state builds"))
+    // Limits high enough that functional tests never hit them; rate
+    // limiting has dedicated tests with deliberately tiny quotas.
+    routes::router_without_peer(
+        AppState::new(pool, cfg).expect("state builds"),
+        Limiters::new(RateLimitConfig {
+            default_per_minute: 10_000,
+            signup_per_minute: 10_000,
+            ..RateLimitConfig::default()
+        }),
+    )
 }
 
 async fn status_of(req: Request<Body>) -> StatusCode {

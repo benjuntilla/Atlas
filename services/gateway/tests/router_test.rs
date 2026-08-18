@@ -15,7 +15,12 @@
 //! test expecting 401 ever reaches the network, it fails with 503 instead
 //! of silently passing.
 
-use atlas_gateway::{config::Config, routes, state::AppState};
+use atlas_gateway::{
+    config::Config,
+    ratelimit::{Limiters, RateLimitConfig},
+    routes,
+    state::AppState,
+};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
@@ -30,11 +35,26 @@ fn test_config() -> Config {
         payments_addr: "http://127.0.0.1:59153".to_string(),
         upstream_timeout: std::time::Duration::from_millis(250),
         upstream_connect_timeout: std::time::Duration::from_millis(250),
+        // Unused: these tests build limiters explicitly via app_with_limits.
+        rate_limit: RateLimitConfig::default(),
     }
 }
 
 fn app() -> axum::Router {
-    routes::router(AppState::connect(&test_config()).expect("lazy channels always build"))
+    // Limits high enough that the functional tests below never hit them;
+    // rate limiting has its own tests with deliberately tiny quotas.
+    app_with_limits(RateLimitConfig {
+        default_per_minute: 10_000,
+        auth_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    })
+}
+
+fn app_with_limits(limits: RateLimitConfig) -> axum::Router {
+    routes::router_without_peer(
+        AppState::connect(&test_config()).expect("lazy channels always build"),
+        Limiters::new(limits),
+    )
 }
 
 async fn status_of(req: Request<Body>) -> StatusCode {
@@ -203,5 +223,114 @@ async fn errors_use_the_documented_envelope() {
     assert!(
         json["error"]["message"].is_string(),
         "message must be a string, got {json}"
+    );
+}
+
+// --- rate limiting ----------------------------------------------------------
+
+/// Credential endpoints get a much smaller quota than everything else,
+/// because they are the ones worth brute forcing.
+#[tokio::test]
+async fn login_is_throttled_after_the_credential_quota() {
+    let app = app_with_limits(RateLimitConfig {
+        auth_per_minute: 3,
+        default_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    });
+
+    let body = r#"{"email":"a@b.dev","password":"x"}"#;
+    // These fail on the unreachable backend, which is fine — what matters
+    // is that the limiter counts them.
+    for _ in 0..3 {
+        let res = app
+            .clone()
+            .oneshot(post_json("/v1/auth/login", body))
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let res = app
+        .clone()
+        .oneshot(post_json("/v1/auth/login", body))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    // A client needs to know how long to wait.
+    assert!(res.headers().contains_key("retry-after"));
+}
+
+/// Spending the credential quota must not lock a caller out of the rest of
+/// the API — otherwise a few bad password attempts would take down a
+/// logged-in session.
+#[tokio::test]
+async fn the_credential_quota_does_not_affect_other_routes() {
+    let app = app_with_limits(RateLimitConfig {
+        auth_per_minute: 1,
+        default_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    });
+
+    let body = r#"{"email":"a@b.dev","password":"x"}"#;
+    let _ = app.clone().oneshot(post_json("/v1/auth/login", body)).await;
+    let throttled = app
+        .clone()
+        .oneshot(post_json("/v1/auth/login", body))
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Health and ordinary routes still answer.
+    let health = app.clone().oneshot(get("/healthz")).await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    let protected = app.clone().oneshot(get("/v1/auth/me")).await.unwrap();
+    assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The 429 body must use the same envelope as every other error, so an SDK
+/// branching on `code` needs no special case.
+#[tokio::test]
+async fn a_throttled_response_uses_the_documented_envelope() {
+    let app = app_with_limits(RateLimitConfig {
+        auth_per_minute: 1,
+        default_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    });
+    let body = r#"{"email":"a@b.dev","password":"x"}"#;
+    let _ = app.clone().oneshot(post_json("/v1/auth/login", body)).await;
+
+    let res = app
+        .clone()
+        .oneshot(post_json("/v1/auth/login", body))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"], "resource_exhausted");
+    assert!(json["error"]["message"].is_string());
+}
+
+/// Health checks must never be throttled: a limiter that 429s the liveness
+/// probe would have Kubernetes restart the pod under load, turning a busy
+/// replica into a crash loop.
+#[tokio::test]
+async fn health_probes_survive_an_exhausted_default_quota() {
+    let app = app_with_limits(RateLimitConfig {
+        default_per_minute: 1,
+        auth_per_minute: 10_000,
+        ..RateLimitConfig::default()
+    });
+
+    // Spend the default quota on the shared "unknown" bucket.
+    let _ = app.clone().oneshot(get("/healthz")).await;
+    let res = app.clone().oneshot(get("/healthz")).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "liveness must not be rate limited"
     );
 }

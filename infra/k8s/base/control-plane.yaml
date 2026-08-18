@@ -103,6 +103,18 @@ spec:
                 configMapKeyRef:
                   name: atlas-config
                   key: GATEWAY_METRICS_URL
+            # Exactly one proxy sits in front (ingress-nginx), so the
+            # client address is the last X-Forwarded-For entry. Leaving this
+            # at 0 would key every unauthenticated request by the ingress
+            # controller's pod IP — one shared bucket for the whole
+            # internet, throttling all users together while doing nothing
+            # about any individual attacker.
+            - name: TRUSTED_PROXY_HOPS
+              value: "1"
+            - name: RATE_LIMIT_PER_MINUTE
+              value: "120"
+            - name: RATE_LIMIT_SIGNUP_PER_MINUTE
+              value: "3"
             - name: RUST_LOG
               valueFrom:
                 configMapKeyRef: { name: atlas-config, key: RUST_LOG }

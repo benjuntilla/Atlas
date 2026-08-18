@@ -39,6 +39,7 @@ pub mod error;
 pub mod keys;
 pub mod metrics;
 pub mod models;
+pub mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod status;

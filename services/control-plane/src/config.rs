@@ -31,6 +31,9 @@ pub struct Config {
     pub endpoint_template: String,
 
     pub probe_timeout: Duration,
+
+    /// Per-replica request limiting. Chiefly guards POST /v1/accounts.
+    pub rate_limit: crate::ratelimit::RateLimitConfig,
 }
 
 impl Config {
@@ -62,12 +65,29 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2_000),
             ),
+            rate_limit: crate::ratelimit::RateLimitConfig {
+                default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 120),
+                signup_per_minute: parse_u32("RATE_LIMIT_SIGNUP_PER_MINUTE", 3),
+                // 0 = trust nothing in X-Forwarded-For. Behind the
+                // ingress-nginx in infra/k8s this is 1.
+                trusted_proxy_hops: parse_u32("TRUSTED_PROXY_HOPS", 0) as usize,
+                enabled: env::var("RATE_LIMIT_ENABLED")
+                    .map(|v| v != "false" && v != "0")
+                    .unwrap_or(true),
+            },
         }
     }
 
     pub fn endpoint_for(&self, project_name: &str) -> String {
         self.endpoint_template.replace("{name}", project_name)
     }
+}
+
+fn parse_u32(var: &str, default: u32) -> u32 {
+    env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn parse_addr(var: &str, default: &str) -> SocketAddr {
@@ -94,6 +114,7 @@ mod tests {
             gateway_metrics_url: String::new(),
             endpoint_template: "https://api.atlas.dev/v1/{name}".to_string(),
             probe_timeout: Duration::from_millis(1),
+            rate_limit: crate::ratelimit::RateLimitConfig::default(),
         }
     }
 

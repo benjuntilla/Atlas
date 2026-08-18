@@ -24,6 +24,10 @@ pub struct Config {
     pub upstream_timeout: Duration,
     /// TCP connect timeout for a lazily-established upstream channel.
     pub upstream_connect_timeout: Duration,
+
+    /// Per-replica request limiting. See `ratelimit.rs` for what this does
+    /// and does not protect.
+    pub rate_limit: crate::ratelimit::RateLimitConfig,
 }
 
 impl Config {
@@ -39,6 +43,17 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:50053".to_string()),
             upstream_timeout: parse_secs("UPSTREAM_TIMEOUT_SECONDS", 10),
             upstream_connect_timeout: parse_secs("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 5),
+            rate_limit: crate::ratelimit::RateLimitConfig {
+                default_per_minute: parse_u32("RATE_LIMIT_PER_MINUTE", 600),
+                auth_per_minute: parse_u32("RATE_LIMIT_AUTH_PER_MINUTE", 10),
+                // Defaults to 0: trust nothing in X-Forwarded-For unless the
+                // operator states how many proxies actually sit in front.
+                // Behind the ingress-nginx in infra/k8s this is 1.
+                trusted_proxy_hops: parse_u32("TRUSTED_PROXY_HOPS", 0) as usize,
+                enabled: env::var("RATE_LIMIT_ENABLED")
+                    .map(|v| v != "false" && v != "0")
+                    .unwrap_or(true),
+            },
         }
     }
 }
@@ -48,6 +63,13 @@ fn parse_addr(var: &str, default: &str) -> SocketAddr {
         .unwrap_or_else(|_| default.to_string())
         .parse()
         .unwrap_or_else(|_| panic!("{var} must be a valid socket address"))
+}
+
+fn parse_u32(var: &str, default: u32) -> u32 {
+    env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn parse_secs(var: &str, default: u64) -> Duration {

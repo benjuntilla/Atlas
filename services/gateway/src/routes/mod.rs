@@ -17,9 +17,32 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::metrics;
+use crate::ratelimit::{self, Limiters};
 use crate::state::AppState;
+use std::sync::Arc;
 
-pub fn router(state: AppState) -> Router {
+/// Router for production, where the listener supplies a peer address.
+///
+/// Rate limiting sits OUTSIDE the metrics layer so a throttled request is
+/// still counted — a spike of 429s is exactly what you want to see on a
+/// dashboard, and a limiter that hides its own effect is untuneable.
+pub fn router(state: AppState, limiters: Arc<Limiters>) -> Router {
+    base_router(state).layer(middleware::from_fn_with_state(
+        Arc::clone(&limiters),
+        ratelimit::layer,
+    ))
+}
+
+/// Router for tests and for any listener without `ConnectInfo`. Identical
+/// except that every request shares the "unknown" address bucket.
+pub fn router_without_peer(state: AppState, limiters: Arc<Limiters>) -> Router {
+    base_router(state).layer(middleware::from_fn_with_state(
+        Arc::clone(&limiters),
+        ratelimit::layer_without_peer,
+    ))
+}
+
+fn base_router(state: AppState) -> Router {
     // Any-origin CORS is correct for a token-authenticated public API:
     // credentials never ride in cookies, so there is no CSRF surface to
     // protect, and browser SDK users can call from any origin. Note that

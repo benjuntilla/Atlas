@@ -8,7 +8,7 @@
 //!   5. Trap SIGTERM / SIGINT for graceful shutdown.
 
 use anyhow::Context;
-use atlas_control_plane::{config, db, metrics, routes, state};
+use atlas_control_plane::{config, db, metrics, ratelimit, routes, state};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -40,18 +40,33 @@ async fn main() -> anyhow::Result<()> {
         .context("postgres connection")?;
     info!("postgres pool ready");
 
+    let limiters = ratelimit::Limiters::new(cfg.rate_limit.clone());
+    limiters.spawn_gc();
+    info!(
+        default_per_minute = cfg.rate_limit.default_per_minute,
+        signup_per_minute = cfg.rate_limit.signup_per_minute,
+        trusted_proxy_hops = cfg.rate_limit.trusted_proxy_hops,
+        enabled = cfg.rate_limit.enabled,
+        "rate limiting configured (per replica)"
+    );
+
     let http_addr = cfg.http_addr;
-    let app = routes::router(state::AppState::new(pool, cfg)?);
+    let app = routes::router(state::AppState::new(pool, cfg)?, limiters);
 
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("binding {http_addr}"))?;
     info!(addr = %http_addr, "control plane listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("axum server")?;
+    // into_make_service_with_connect_info so the limiter sees the real peer
+    // address; without it every signup would share one bucket.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("axum server")?;
 
     info!("atlas-control-plane exited cleanly");
     Ok(())
