@@ -60,7 +60,7 @@ spec:
       # Postgres. It only speaks gRPC to the three backends.
       containers:
         - name: gateway
-          image: atlas/gateway:latest
+          image: ghcr.io/nairinn/atlas-gateway:latest
           ports:
             - name: http
               containerPort: 8080

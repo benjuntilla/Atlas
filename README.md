@@ -31,12 +31,12 @@ In active development. The repository currently contains:
 * Per-schema SQL migrations including PostGIS extensions
 * Local development environment via `docker-compose`
 * CI on GitHub Actions: fmt + clippy + tests for Rust, Gradle build for Kotlin, and a job that applies every migration against a real PostGIS instance
-
 * A **migration runner** (`atlas-migrate`) with recorded history, so schema changes can be applied to a running database
 * **Kubernetes manifests** for the whole platform — Deployments, HPAs, PDBs, NetworkPolicies, Ingress — validated in CI against real API schemas
+* **Container images** for all nine workloads, built and pushed to GHCR on every push
+* **Terraform** for GCP: VPC, GKE with Dataplane V2, private Cloud SQL with PostGIS, Secret Manager, Workload Identity
 
-Still to come: the language SDKs (TypeScript, Dart, Rust) and Terraform for
-GCP/GKE provisioning.
+Still to come: the language SDKs (TypeScript, Dart, Rust).
 
 ### Database migrations
 
@@ -308,7 +308,7 @@ atlas/
 │   │   ├── base/       # Deployments, HPAs, PDBs, NetworkPolicies, Ingress
 │   │   ├── overlays/   # dev (1 replica) and prod (zone spread)
 │   │   └── kafka-topics.yaml  # Strimzi KafkaTopic CRDs
-│   └── terraform/      # GCP and GKE provisioning (planned)
+│   └── terraform/      # VPC, GKE, Cloud SQL, Secret Manager, IAM
 ├── atlas.toml.example  # Sample developer config
 └── docker-compose.yml  # Local dev environment
 ```

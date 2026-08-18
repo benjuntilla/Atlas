@@ -34,6 +34,21 @@ infra/k8s/
 kubectl apply -k infra/k8s/overlays/prod
 ```
 
+## Images
+
+Built and pushed by `.github/workflows/release.yml` to
+`ghcr.io/nairinn/atlas-<name>`, tagged with the full commit SHA plus
+`latest` on the default branch. Pin a release by overriding the tag rather
+than editing a manifest:
+
+```bash
+cd infra/k8s/overlays/prod
+kustomize edit set image ghcr.io/nairinn/atlas-gateway=ghcr.io/nairinn/atlas-gateway:sha-<sha>
+```
+
+GHCR packages are private by default, so the cluster needs a pull secret —
+see step 5 of `infra/terraform/README.md`.
+
 ## Secrets are not in this repo
 
 `secrets.example.yaml` documents the required keys with placeholder values

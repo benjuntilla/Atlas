@@ -219,3 +219,25 @@ jobs:
               exit 1
             fi
           done
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Format
+        run: terraform -chdir=infra/terraform fmt -check -diff
+
+      # -backend=false so no GCS bucket or credentials are needed; this
+      # still downloads the provider, which is what `validate` needs to
+      # check resource and attribute names rather than just HCL syntax.
+      - name: Init
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform -chdir=infra/terraform validate
