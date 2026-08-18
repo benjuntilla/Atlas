@@ -35,8 +35,9 @@ In active development. The repository currently contains:
 * **Kubernetes manifests** for the whole platform — Deployments, HPAs, PDBs, NetworkPolicies, Ingress — validated in CI against real API schemas
 * **Container images** for all nine workloads, built and pushed to GHCR on every push
 * **Terraform** for GCP: VPC, GKE with Dataplane V2, private Cloud SQL with PostGIS, Secret Manager, Workload Identity
+* A **TypeScript SDK** (`sdks/typescript`) with zero runtime dependencies, covering the whole gateway surface
 
-Still to come: the language SDKs (TypeScript, Dart, Rust).
+Still to come: the Dart and Rust SDKs.
 
 ### Database migrations
 
@@ -94,7 +95,7 @@ The Kotlin build needs only a JDK 21 — `protobuf-gradle-plugin` resolves
 | Inter-service RPC | gRPC with shared `.proto` contracts |
 | Event bus | Apache Kafka with protobuf-encoded payloads |
 | Database | PostgreSQL 15 with PostGIS (per-service schemas, single instance) |
-| SDKs | TypeScript, Dart, Rust (planned) |
+| SDKs | TypeScript (shipped); Dart and Rust planned |
 | Infrastructure | Terraform, Kubernetes on GKE, Docker Compose for local dev |
 | Observability | Prometheus metrics, structured JSON logging |
 | CI/CD | GitHub Actions |
@@ -252,6 +253,29 @@ produces the event and the ELO scores in `safety_ratings` never change.
 `GetNearby` therefore returns the neutral 1500.0 for every user. That is a
 known gap, not an oversight in this phase.
 
+## SDK
+
+`sdks/typescript` wraps the HTTP API above. No runtime dependencies — it
+uses the platform `fetch`.
+
+```ts
+import { AtlasClient, AtlasError } from '@atlas/sdk';
+
+const atlas = new AtlasClient({ baseUrl: 'https://api.atlas.dev' });
+await atlas.auth.login({ email, password });   // token stored on the client
+
+const { users } = await atlas.geo.nearby({ lat, lng, radiusM: 500 });
+const { balanceCents } = await atlas.payments.wallet();
+```
+
+Two things it inherits from the API design. No method takes a user id —
+identity comes from the token, mirroring the gateway's own rule — and
+`payments.createTransaction` always sends an idempotency key, which is
+what makes it the only POST the transport will retry. Errors arrive as
+`AtlasError` carrying the stable `code` from the envelope.
+
+See `sdks/typescript/README.md` for the retry policy and the full surface.
+
 ## Architecture
 
 ```
@@ -302,6 +326,8 @@ atlas/
 │   └── fare-consumer/     # Settlement (Kotlin)
 ├── tools/
 │   └── migrator/       # Schema migration runner (Rust)
+├── sdks/
+│   └── typescript/     # @atlas/sdk — TypeScript client
 ├── .github/workflows/  # CI
 ├── infra/
 │   ├── k8s/

@@ -241,3 +241,30 @@ jobs:
 
       - name: Validate
         run: terraform -chdir=infra/terraform validate
+
+  sdk-typescript:
+    name: SDK (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Built and tested on the OLDEST version the package claims to
+          # support, not the newest. The floor is 20.3 because the
+          # transport uses AbortSignal.any (20.3+) and globalThis.crypto
+          # (19+); testing only on latest would have hidden that.
+          node-version: "20.3"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # Builds with strict TypeScript, then runs the suite against a real
+      # local HTTP server.
+      - name: Test
+        run: npm test
