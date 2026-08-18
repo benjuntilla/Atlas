@@ -6,6 +6,7 @@ import io.atlas.fare.db.DatabaseBootstrap
 import io.atlas.fare.db.ExposedAuditLog
 import io.atlas.fare.db.ExposedTransactionLookup
 import io.atlas.fare.db.TransactionEvents
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.timestamp
 import org.jetbrains.exposed.sql.selectAll
@@ -43,6 +44,7 @@ class ExposedAdaptersTest {
     /** Minimal writer for payments.transactions, to seed lookup fixtures. */
     private object TransactionsWrite : Table("payments.transactions") {
         val id = uuid("id")
+        val projectId = uuid("project_id")
         val amountCents = long("amount_cents")
         val status = text("status")
         val idempotencyKey = text("idempotency_key")
@@ -75,11 +77,33 @@ class ExposedAdaptersTest {
     private fun requireDatabase() =
         assumeTrue(connected, "ATLAS_TEST_DATABASE_URL not set; skipping database tests")
 
+    /** A real project, so scoping is exercised rather than defaulted. */
+    private fun seedProject(): UUID {
+        val account = UUID.randomUUID()
+        val project = UUID.randomUUID()
+        transaction {
+            exec(
+                "INSERT INTO control.accounts (id, email) VALUES " +
+                    "('$account', '$account@fare.test')",
+            )
+            exec(
+                "INSERT INTO control.projects (id, account_id, name, region, environment, endpoint) " +
+                    "VALUES ('$project', '$account', 'fare-$project', 'local', 'development', '')",
+            )
+        }
+        return project
+    }
+
     private fun entry(
         key: String = UUID.randomUUID().toString(),
         transactionId: UUID? = null,
         rideId: UUID? = null,
+        // A real project, not a random UUID: transaction_events.project_id
+        // has a foreign key, so a made-up value fails the insert. Evaluated
+        // per call, which is what makes each test's rows its own.
+        projectId: UUID = seedProject(),
     ) = AuditEntry(
+        projectId = projectId,
         eventKey = key,
         transactionId = transactionId,
         rideId = rideId,
@@ -110,25 +134,66 @@ class ExposedAdaptersTest {
     fun `recording the same event key twice inserts one row`() {
         requireDatabase()
         val key = UUID.randomUUID().toString()
+        // One project for both records: the index is (project, key), so a
+        // second project here would be testing the scoping instead of the
+        // dedup — which the test below does deliberately.
+        val project = seedProject()
         val log = ExposedAuditLog()
 
-        assertTrue(log.record(entry(key = key)), "first insert should report recorded")
-        assertFalse(log.record(entry(key = key)), "replay should report already-recorded")
+        assertTrue(
+            log.record(entry(key = key, projectId = project)),
+            "first insert should report recorded",
+        )
+        assertFalse(
+            log.record(entry(key = key, projectId = project)),
+            "replay should report already-recorded",
+        )
+
+        val count = transaction {
+            TransactionEvents.selectAll().where {
+                (TransactionEvents.projectId eq project) and (TransactionEvents.eventKey eq key)
+            }.count()
+        }
+        assertEquals(1, count)
+    }
+
+    /**
+     * event_key is a hash over fields the caller supplies — ride_id among
+     * them — so two tenants can legitimately produce the same one. While
+     * the dedup index was global, the second tenant's audit row was
+     * silently dropped: not an error, just a missing record of something
+     * that happened.
+     */
+    @Test
+    fun `the same event key in two projects records two rows`() {
+        requireDatabase()
+        val key = UUID.randomUUID().toString()
+        val first = seedProject()
+        val second = seedProject()
+        val log = ExposedAuditLog()
+
+        assertTrue(log.record(entry(key = key, projectId = first)))
+        assertTrue(
+            log.record(entry(key = key, projectId = second)),
+            "another tenant's identical key must not be treated as a replay",
+        )
 
         val count = transaction {
             TransactionEvents.selectAll().where { TransactionEvents.eventKey eq key }.count()
         }
-        assertEquals(1, count)
+        assertEquals(2, count)
     }
 
     @Test
     fun `lookup finds the transaction for a ride`() {
         requireDatabase()
+        val project = seedProject()
         val rideId = UUID.randomUUID()
         val txId = UUID.randomUUID()
         transaction {
             TransactionsWrite.insert {
                 it[id] = txId
+                it[projectId] = project
                 it[amountCents] = 2_500
                 it[status] = "pending"
                 it[idempotencyKey] = "test-${UUID.randomUUID()}"
@@ -137,13 +202,45 @@ class ExposedAdaptersTest {
             }
         }
 
-        assertEquals(txId, ExposedTransactionLookup().findByRideId(rideId))
+        assertEquals(txId, ExposedTransactionLookup().findByRideId(project, rideId))
+    }
+
+    /**
+     * ride_id is opaque to Atlas and chosen by the caller, so two tenants
+     * using the same one is normal. Unscoped, this lookup would resolve a
+     * ride to another tenant's transaction — and the caller of this method
+     * hands the result straight to settle().
+     */
+    @Test
+    fun `lookup does not find another project's transaction`() {
+        requireDatabase()
+        val project = seedProject()
+        val other = seedProject()
+        val rideId = UUID.randomUUID()
+        val txId = UUID.randomUUID()
+        transaction {
+            TransactionsWrite.insert {
+                it[id] = txId
+                it[projectId] = project
+                it[amountCents] = 2_500
+                it[status] = "pending"
+                it[idempotencyKey] = "test-${UUID.randomUUID()}"
+                it[TransactionsWrite.rideId] = rideId
+                it[createdAt] = Instant.now()
+            }
+        }
+
+        assertEquals(txId, ExposedTransactionLookup().findByRideId(project, rideId))
+        assertNull(
+            ExposedTransactionLookup().findByRideId(other, rideId),
+            "the same ride id in another project must not resolve",
+        )
     }
 
     @Test
     fun `lookup returns null for an unknown ride`() {
         requireDatabase()
-        assertNull(ExposedTransactionLookup().findByRideId(UUID.randomUUID()))
+        assertNull(ExposedTransactionLookup().findByRideId(seedProject(), UUID.randomUUID()))
     }
 
     /**
@@ -154,12 +251,14 @@ class ExposedAdaptersTest {
     @Test
     fun `lookup skips refunded transactions in favour of the live one`() {
         requireDatabase()
+        val project = seedProject()
         val rideId = UUID.randomUUID()
         val refunded = UUID.randomUUID()
         val live = UUID.randomUUID()
         transaction {
             TransactionsWrite.insert {
                 it[id] = refunded
+                it[projectId] = project
                 it[amountCents] = 2_500
                 it[status] = "refunded"
                 it[idempotencyKey] = "test-${UUID.randomUUID()}"
@@ -168,6 +267,7 @@ class ExposedAdaptersTest {
             }
             TransactionsWrite.insert {
                 it[id] = live
+                it[projectId] = project
                 it[amountCents] = 2_500
                 it[status] = "pending"
                 it[idempotencyKey] = "test-${UUID.randomUUID()}"
@@ -176,6 +276,6 @@ class ExposedAdaptersTest {
             }
         }
 
-        assertEquals(live, ExposedTransactionLookup().findByRideId(rideId))
+        assertEquals(live, ExposedTransactionLookup().findByRideId(project, rideId))
     }
 }

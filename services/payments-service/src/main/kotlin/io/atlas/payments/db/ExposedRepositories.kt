@@ -9,6 +9,7 @@ import io.atlas.payments.core.Wallet
 import io.atlas.payments.core.WalletRepository
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -45,11 +46,12 @@ private fun ResultRow.toTxRecord() = TxRecord(
 )
 
 class ExposedWalletRepository : WalletRepository {
-    override fun getOrCreateByUser(userId: UUID): Wallet = transaction {
-        Wallets.selectAll().where { Wallets.userId eq userId }.singleOrNull()?.toWallet()
+    override fun getOrCreateByUser(projectId: UUID, userId: UUID): Wallet = transaction {
+        scoped(projectId, userId).singleOrNull()?.toWallet()
             ?: run {
                 try {
                     Wallets.insert {
+                        it[Wallets.projectId] = projectId
                         it[Wallets.userId] = userId
                         it[balanceCents] = 0
                         it[currency] = "USD"
@@ -60,38 +62,52 @@ class ExposedWalletRepository : WalletRepository {
                     // violation and re-read the winning row below.
                     if (e.sqlState != "23505") throw e
                 }
-                Wallets.selectAll().where { Wallets.userId eq userId }.single().toWallet()
+                scoped(projectId, userId).single().toWallet()
             }
     }
 
-    override fun findByUser(userId: UUID): Wallet? = transaction {
-        Wallets.selectAll().where { Wallets.userId eq userId }.singleOrNull()?.toWallet()
+    override fun findByUser(projectId: UUID, userId: UUID): Wallet? = transaction {
+        scoped(projectId, userId).singleOrNull()?.toWallet()
     }
 
-    override fun findById(id: UUID): Wallet? = transaction {
-        Wallets.selectAll().where { Wallets.id eq id }.singleOrNull()?.toWallet()
+    override fun findById(projectId: UUID, id: UUID): Wallet? = transaction {
+        Wallets.selectAll()
+            .where { (Wallets.projectId eq projectId) and (Wallets.id eq id) }
+            .singleOrNull()?.toWallet()
     }
 
-    override fun adjustBalance(walletId: UUID, deltaCents: Long) {
+    // The project predicate is redundant while walletId comes from a
+    // scoped lookup, and that is exactly why it is here: this is the
+    // statement that moves money, and it should not depend on every
+    // caller having been careful.
+    override fun adjustBalance(projectId: UUID, walletId: UUID, deltaCents: Long) {
         transaction {
-            Wallets.update({ Wallets.id eq walletId }) {
+            Wallets.update({ (Wallets.projectId eq projectId) and (Wallets.id eq walletId) }) {
                 it[balanceCents] = balanceCents + deltaCents
                 it[updatedAt] = Instant.now()
             }
         }
     }
+
+    private fun scoped(projectId: UUID, userId: UUID) =
+        Wallets.selectAll().where { (Wallets.projectId eq projectId) and (Wallets.userId eq userId) }
 }
 
 class ExposedTransactionRepository : TransactionRepository {
-    override fun findByIdempotencyKey(key: String): TxRecord? = transaction {
-        Transactions.selectAll().where { Transactions.idempotencyKey eq key }.singleOrNull()?.toTxRecord()
+    override fun findByIdempotencyKey(projectId: UUID, key: String): TxRecord? = transaction {
+        Transactions.selectAll()
+            .where { (Transactions.projectId eq projectId) and (Transactions.idempotencyKey eq key) }
+            .singleOrNull()?.toTxRecord()
     }
 
-    override fun findById(id: UUID): TxRecord? = transaction {
-        Transactions.selectAll().where { Transactions.id eq id }.singleOrNull()?.toTxRecord()
+    override fun findById(projectId: UUID, id: UUID): TxRecord? = transaction {
+        Transactions.selectAll()
+            .where { (Transactions.projectId eq projectId) and (Transactions.id eq id) }
+            .singleOrNull()?.toTxRecord()
     }
 
     override fun insertPending(
+        projectId: UUID,
         fromWallet: UUID?,
         toWallet: UUID?,
         amountCents: Long,
@@ -103,6 +119,7 @@ class ExposedTransactionRepository : TransactionRepository {
     ): TxRecord = transaction {
         try {
             val id = Transactions.insert {
+                it[Transactions.projectId] = projectId
                 it[Transactions.fromWallet] = fromWallet
                 it[Transactions.toWallet] = toWallet
                 it[Transactions.amountCents] = amountCents
@@ -121,26 +138,26 @@ class ExposedTransactionRepository : TransactionRepository {
         }
     }
 
-    override fun markSettled(id: UUID, settledAt: Instant) {
+    override fun markSettled(projectId: UUID, id: UUID, settledAt: Instant) {
         transaction {
-            Transactions.update({ Transactions.id eq id }) {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
                 it[status] = TxStatus.SETTLED
                 it[Transactions.settledAt] = settledAt
             }
         }
     }
 
-    override fun markRefunded(id: UUID) {
+    override fun markRefunded(projectId: UUID, id: UUID) {
         transaction {
-            Transactions.update({ Transactions.id eq id }) {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
                 it[status] = TxStatus.REFUNDED
             }
         }
     }
 
-    override fun markFailed(id: UUID, reason: String) {
+    override fun markFailed(projectId: UUID, id: UUID, reason: String) {
         transaction {
-            Transactions.update({ Transactions.id eq id }) {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
                 it[status] = TxStatus.FAILED
             }
         }

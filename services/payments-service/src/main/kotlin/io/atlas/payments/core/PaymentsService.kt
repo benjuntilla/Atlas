@@ -65,6 +65,7 @@ class PaymentsService(
      * network service and write a database in two separate steps.
      */
     fun deposit(
+        projectId: UUID,
         userId: String,
         amountCents: Long,
         idempotencyKey: String,
@@ -78,14 +79,14 @@ class PaymentsService(
         // conflict, not a silent success returning the wrong transaction.
         val argsHash = idempotencyArgsHash(userId, "", amountCents, "")
 
-        transactions.findByIdempotencyKey(idempotencyKey)?.let { existing ->
+        transactions.findByIdempotencyKey(projectId, idempotencyKey)?.let { existing ->
             if (existing.idempotencyArgsHash != argsHash) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
             return DepositResult(
                 existing.id,
                 existing.status,
-                walletBalance(userId).balanceCents,
+                walletBalance(projectId, userId).balanceCents,
             )
         }
 
@@ -94,8 +95,9 @@ class PaymentsService(
 
         val pending = try {
             runner.run {
-                val wallet = wallets.getOrCreateByUser(userUuid)
+                val wallet = wallets.getOrCreateByUser(projectId, userUuid)
                 transactions.insertPending(
+                    projectId,
                     // No source wallet: this money comes from outside the
                     // platform. That is what makes it a deposit.
                     fromWallet = null,
@@ -109,11 +111,11 @@ class PaymentsService(
                 )
             }
         } catch (e: DuplicateIdempotencyKey) {
-            val winner = transactions.findByIdempotencyKey(idempotencyKey) ?: throw e
+            val winner = transactions.findByIdempotencyKey(projectId, idempotencyKey) ?: throw e
             if (winner.idempotencyArgsHash != argsHash) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
-            return DepositResult(winner.id, winner.status, walletBalance(userId).balanceCents)
+            return DepositResult(winner.id, winner.status, walletBalance(projectId, userId).balanceCents)
         }
 
         val capture = provider.capture(auth.providerRef)
@@ -121,7 +123,7 @@ class PaymentsService(
             // The charge was refused, so leaving the row pending would have
             // the reconciliation sweep retry a capture the provider has
             // already declined.
-            transactions.markFailed(pending.id, capture.message ?: "capture declined")
+            transactions.markFailed(projectId, pending.id, capture.message ?: "capture declined")
             metrics.depositFailed()
             throw PaymentError.ProviderDeclined(capture.message ?: "capture declined")
         }
@@ -129,8 +131,8 @@ class PaymentsService(
         val balance = runner.run {
             val walletId = pending.toWallet
                 ?: throw PaymentError.InvalidState("deposit has no destination wallet")
-            wallets.adjustBalance(walletId, amountCents)
-            transactions.markSettled(pending.id, clock.instant())
+            wallets.adjustBalance(projectId, walletId, amountCents)
+            transactions.markSettled(projectId, pending.id, clock.instant())
             outbox.enqueue(
                 pending.id,
                 fareTopic,
@@ -139,9 +141,9 @@ class PaymentsService(
                 // treat that as an audit record, and adding an enum value
                 // would force every consumer to redeploy before deposits
                 // could ship.
-                fareEvent("", pending.id, FareEvent.EventType.TRANSACTION_SETTLED, amountCents),
+                fareEvent(projectId, "", pending.id, FareEvent.EventType.TRANSACTION_SETTLED, amountCents),
             )
-            wallets.findById(walletId)?.balanceCents ?: amountCents
+            wallets.findById(projectId, walletId)?.balanceCents ?: amountCents
         }
 
         metrics.depositSettled()
@@ -150,6 +152,7 @@ class PaymentsService(
     }
 
     fun initiate(
+        projectId: UUID,
         fromUserId: String,
         toUserId: String,
         amountCents: Long,
@@ -167,7 +170,7 @@ class PaymentsService(
         val argsHash = idempotencyArgsHash(fromUserId, toUserId, amountCents, rideId)
 
         // Idempotent replay: same key + same args returns the existing tx.
-        transactions.findByIdempotencyKey(idempotencyKey)?.let { existing ->
+        transactions.findByIdempotencyKey(projectId, idempotencyKey)?.let { existing ->
             if (existing.idempotencyArgsHash != argsHash) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
             }
@@ -180,9 +183,10 @@ class PaymentsService(
 
         val txId = try {
             runner.run {
-                val fromWallet = wallets.getOrCreateByUser(fromUuid)
-                val toWallet = wallets.getOrCreateByUser(toUuid)
+                val fromWallet = wallets.getOrCreateByUser(projectId, fromUuid)
+                val toWallet = wallets.getOrCreateByUser(projectId, toUuid)
                 val record = transactions.insertPending(
+                    projectId,
                     fromWallet = fromWallet.id,
                     toWallet = toWallet.id,
                     amountCents = amountCents,
@@ -194,7 +198,7 @@ class PaymentsService(
                 outbox.enqueue(
                     record.id,
                     fareTopic,
-                    fareEvent(rideId, record.id, FareEvent.EventType.RIDE_ACCEPTED, amountCents),
+                    fareEvent(projectId, rideId, record.id, FareEvent.EventType.RIDE_ACCEPTED, amountCents),
                 )
                 record.id
             }
@@ -202,7 +206,7 @@ class PaymentsService(
             // Lost a race with a concurrent identical request. The duplicate-key
             // violation rolled the whole transaction back, so we re-read the
             // winner in a FRESH transaction (the aborted one cannot run queries).
-            val winner = transactions.findByIdempotencyKey(idempotencyKey)
+            val winner = transactions.findByIdempotencyKey(projectId, idempotencyKey)
                 ?: throw e
             if (winner.idempotencyArgsHash != argsHash) {
                 throw PaymentError.IdempotencyConflict(idempotencyKey)
@@ -213,9 +217,9 @@ class PaymentsService(
         return InitiateResult(txId, TxStatus.PENDING)
     }
 
-    fun settle(transactionId: String): SettleResult {
+    fun settle(projectId: UUID, transactionId: String): SettleResult {
         val txUuid = parseUuid(transactionId, "transaction_id")
-        val tx = transactions.findById(txUuid)
+        val tx = transactions.findById(projectId, txUuid)
             ?: throw PaymentError.TransactionNotFound(transactionId)
         when (tx.status) {
             TxStatus.SETTLED -> return SettleResult(true, TxStatus.SETTLED) // idempotent
@@ -229,27 +233,27 @@ class PaymentsService(
         runner.run {
             val fromWalletId = tx.fromWallet
                 ?: throw PaymentError.InvalidState("transaction has no source wallet")
-            val fromWallet = wallets.findById(fromWalletId)
+            val fromWallet = wallets.findById(projectId, fromWalletId)
                 ?: throw PaymentError.InvalidState("source wallet not found")
             if (fromWallet.balanceCents < tx.amountCents) {
                 throw PaymentError.InsufficientFunds(fromWallet.id)
             }
-            wallets.adjustBalance(fromWalletId, -tx.amountCents)
-            tx.toWallet?.let { wallets.adjustBalance(it, tx.amountCents) }
-            transactions.markSettled(txUuid, clock.instant())
+            wallets.adjustBalance(projectId, fromWalletId, -tx.amountCents)
+            tx.toWallet?.let { wallets.adjustBalance(projectId, it, tx.amountCents) }
+            transactions.markSettled(projectId, txUuid, clock.instant())
             outbox.enqueue(
                 txUuid,
                 fareTopic,
-                fareEvent(rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_SETTLED, tx.amountCents),
+                fareEvent(projectId, rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_SETTLED, tx.amountCents),
             )
         }
         metrics.transactionSettled()
         return SettleResult(true, TxStatus.SETTLED)
     }
 
-    fun refund(transactionId: String): RefundResult {
+    fun refund(projectId: UUID, transactionId: String): RefundResult {
         val txUuid = parseUuid(transactionId, "transaction_id")
-        val tx = transactions.findById(txUuid)
+        val tx = transactions.findById(projectId, txUuid)
             ?: throw PaymentError.TransactionNotFound(transactionId)
         when (tx.status) {
             TxStatus.REFUNDED -> return RefundResult(true) // idempotent
@@ -262,22 +266,22 @@ class PaymentsService(
 
         runner.run {
             // Reverse the settle: money flows back from payee to payer.
-            tx.fromWallet?.let { wallets.adjustBalance(it, tx.amountCents) }
-            tx.toWallet?.let { wallets.adjustBalance(it, -tx.amountCents) }
-            transactions.markRefunded(txUuid)
+            tx.fromWallet?.let { wallets.adjustBalance(projectId, it, tx.amountCents) }
+            tx.toWallet?.let { wallets.adjustBalance(projectId, it, -tx.amountCents) }
+            transactions.markRefunded(projectId, txUuid)
             outbox.enqueue(
                 txUuid,
                 fareTopic,
-                fareEvent(rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_REFUNDED, tx.amountCents),
+                fareEvent(projectId, rideRef(tx), txUuid, FareEvent.EventType.TRANSACTION_REFUNDED, tx.amountCents),
             )
         }
         metrics.transactionRefunded()
         return RefundResult(true)
     }
 
-    fun walletBalance(userId: String): WalletBalance {
+    fun walletBalance(projectId: UUID, userId: String): WalletBalance {
         val uuid = parseUuid(userId, "user_id")
-        val wallet = wallets.findByUser(uuid)
+        val wallet = wallets.findByUser(projectId, uuid)
         return if (wallet == null) {
             WalletBalance(0, "USD")
         } else {
@@ -289,13 +293,21 @@ class PaymentsService(
 
     private fun rideRef(tx: TxRecord): String = tx.rideId?.toString() ?: ""
 
+    /**
+     * The event carries its project because the consumer reading it has no
+     * other way to learn one: it runs asynchronously, long after the
+     * request that produced the event is gone, so there is no header and
+     * no token left to derive it from.
+     */
     private fun fareEvent(
+        projectId: UUID,
         rideId: String,
         transactionId: UUID,
         type: FareEvent.EventType,
         amountCents: Long,
     ): ByteArray =
         FareEvent.newBuilder()
+            .setProjectId(projectId.toString())
             .setRideId(rideId)
             .setTransactionId(transactionId.toString())
             .setEventType(type)

@@ -9,20 +9,35 @@ import java.util.UUID
  * so [PaymentsService] can be exercised without a database.
  */
 
+/**
+ * Every method takes projectId FIRST rather than as an optional filter, so
+ * an unscoped query cannot be written by omission — the signature asks on
+ * every call.
+ */
 interface WalletRepository {
     /** Returns the wallet for [userId], creating a zero-balance one if absent. */
-    fun getOrCreateByUser(userId: UUID): Wallet
-    fun findByUser(userId: UUID): Wallet?
-    fun findById(id: UUID): Wallet?
+    fun getOrCreateByUser(projectId: UUID, userId: UUID): Wallet
+    fun findByUser(projectId: UUID, userId: UUID): Wallet?
+    fun findById(projectId: UUID, id: UUID): Wallet?
     /** Adds [deltaCents] (which may be negative) to the wallet balance. */
-    fun adjustBalance(walletId: UUID, deltaCents: Long)
+    fun adjustBalance(projectId: UUID, walletId: UUID, deltaCents: Long)
 }
 
 interface TransactionRepository {
-    fun findByIdempotencyKey(key: String): TxRecord?
-    fun findById(id: UUID): TxRecord?
+    /**
+     * Scoped, and this one is not merely defensive.
+     *
+     * Idempotency keys are chosen by the caller — "order-1" is the string
+     * every integration picks first — and the unique index is
+     * (project_id, idempotency_key). A lookup by key alone would match
+     * another tenant's row and return it as a successful idempotent
+     * replay: not an error, someone else's payment.
+     */
+    fun findByIdempotencyKey(projectId: UUID, key: String): TxRecord?
+    fun findById(projectId: UUID, id: UUID): TxRecord?
     /** Inserts a pending transaction. Throws [DuplicateIdempotencyKey] on conflict. */
     fun insertPending(
+        projectId: UUID,
         fromWallet: UUID?,
         toWallet: UUID?,
         amountCents: Long,
@@ -33,8 +48,8 @@ interface TransactionRepository {
         /** One of [TxKind]. Defaulted so transfer call sites need no change. */
         kind: String = TxKind.TRANSFER,
     ): TxRecord
-    fun markSettled(id: UUID, settledAt: Instant)
-    fun markRefunded(id: UUID)
+    fun markSettled(projectId: UUID, id: UUID, settledAt: Instant)
+    fun markRefunded(projectId: UUID, id: UUID)
 
     /**
      * Mark a transaction failed.
@@ -44,7 +59,7 @@ interface TransactionRepository {
      * pending forever, where the reconciliation sweep would keep
      * retrying a charge the provider has already refused.
      */
-    fun markFailed(id: UUID, reason: String)
+    fun markFailed(projectId: UUID, id: UUID, reason: String)
 }
 
 /**
@@ -55,6 +70,9 @@ interface TransactionRepository {
 interface OutboxStore {
     fun enqueue(transactionId: UUID?, topic: String, payload: ByteArray)
 }
+// payments.outbox needs no project column: the dispatcher drains it
+// globally by age rather than per tenant, each row cascades from its
+// transaction, and the payload itself now carries project_id.
 
 /**
  * Drain side of the outbox. [drain] claims up to [limit] pending rows, calls

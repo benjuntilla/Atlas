@@ -129,6 +129,24 @@ async fn handle_payload(
         }
     };
 
+    // An event with no project cannot be acted on: geofences are per
+    // tenant, so there is no fence set to compare the position against.
+    // Skipping and committing is right rather than retrying — a replay
+    // produces the same missing field, so retrying would wedge the
+    // partition on one bad record.
+    let project_id = match Uuid::parse_str(&event.project_id) {
+        Ok(id) => id,
+        Err(_) => {
+            metrics::counter!("atlas_safety_consumer_errors_total", "kind" => "bad_project_id")
+                .increment(1);
+            warn!(
+                project_id = %event.project_id,
+                "location event has no usable project_id; skipping"
+            );
+            return Handled::Commit;
+        }
+    };
+
     // The proto has no optional scalars, so an unset timestamp arrives as
     // 0. Stamp the alert with now rather than the epoch.
     let occurred_at = if event.recorded_at > 0 {
@@ -137,7 +155,16 @@ async fn handle_payload(
         chrono::Utc::now().timestamp()
     };
 
-    match alerts::apply_position(pool, publisher, user_id, event.lat, event.lng, occurred_at).await
+    match alerts::apply_position(
+        pool,
+        publisher,
+        project_id,
+        user_id,
+        event.lat,
+        event.lng,
+        occurred_at,
+    )
+    .await
     {
         Ok(t) => {
             if !t.is_empty() {
@@ -204,6 +231,7 @@ mod tests {
     async fn non_uuid_user_id_commits_rather_than_wedging() {
         let publisher = RecordingAlertPublisher::default();
         let event = LocationUpdateEvent {
+            project_id: "11111111-1111-1111-1111-111111111111".to_string(),
             user_id: "not-a-uuid".to_string(),
             lat: 1.0,
             lng: 2.0,
@@ -225,6 +253,7 @@ mod tests {
     async fn database_failure_holds_the_offset() {
         let publisher = RecordingAlertPublisher::default();
         let event = LocationUpdateEvent {
+            project_id: "11111111-1111-1111-1111-111111111111".to_string(),
             user_id: Uuid::from_bytes([1; 16]).to_string(),
             lat: 33.4484,
             lng: -112.0740,

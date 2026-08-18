@@ -52,6 +52,7 @@ private fun Table.jsonb(name: String): Column<String> = registerColumn(name, Jso
 
 object Transactions : Table("payments.transactions") {
     val id = uuid("id")
+    val projectId = uuid("project_id")
     val rideId = uuid("ride_id").nullable()
     val status = text("status")
     val createdAt = timestamp("created_at")
@@ -61,12 +62,22 @@ object Transactions : Table("payments.transactions") {
 
 object TransactionEvents : Table("payments.transaction_events") {
     val id = uuid("id").autoGenerate()
+    val projectId = uuid("project_id")
     val transactionId = uuid("transaction_id").nullable()
     val rideId = uuid("ride_id").nullable()
     val eventType = text("event_type")
     val payload = jsonb("payload")
-    val eventKey = text("event_key").uniqueIndex()
+    val eventKey = text("event_key")
     val createdAt = timestamp("created_at")
 
     override val primaryKey = PrimaryKey(id)
+
+    // (project, key), matching `idx_transaction_events_project_key` from
+    // migration 0050. event_key is a hash over fields the caller supplies
+    // — ride_id among them — so two tenants can legitimately produce the
+    // same one, and a global dedup index would drop the second tenant's
+    // audit row on the floor.
+    init {
+        uniqueIndex(projectId, eventKey)
+    }
 }

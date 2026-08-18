@@ -71,6 +71,7 @@ async fn wallet(
         .payments
         .clone()
         .get_wallet_balance(Request::new(WalletRequest {
+            project_id: user.project_id,
             user_id: user.user_id,
         }))
         .await
@@ -124,6 +125,7 @@ async fn deposit(
         .payments
         .clone()
         .deposit(Request::new(DepositRequest {
+            project_id: user.project_id,
             user_id: user.user_id,
             amount_cents: amount,
             idempotency_key,
@@ -195,6 +197,7 @@ async fn initiate(
         .payments
         .clone()
         .initiate_transaction(Request::new(TransactionRequest {
+            project_id: user.project_id,
             from_user_id: user.user_id,
             to_user_id: body.to_user_id.trim().to_string(),
             amount_cents: amount,

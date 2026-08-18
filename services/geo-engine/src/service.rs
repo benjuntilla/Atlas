@@ -122,6 +122,9 @@ impl GeoEngine for GeoEngineImpl {
 
         // Fire-and-forget Kafka enqueue. The row is in Postgres regardless.
         self.producer.enqueue(&LocationUpdateEvent {
+            // The consumer reads this long after the request is gone and
+            // has no other way to learn the tenant.
+            project_id: project_id.to_string(),
             user_id: r.user_id.clone(),
             lat: r.lat,
             lng: r.lng,

@@ -51,8 +51,23 @@ class FareEventHandler(
         val rideId = parseUuidOrNull(event.rideId)
         val eventTransactionId = parseUuidOrNull(event.transactionId)
 
+        // An event with no project cannot be acted on: settle and refund
+        // are scoped, so there is no tenant to scope them to. Committing
+        // rather than retrying is right — a replay carries the same
+        // missing field, so retrying would wedge the partition on one bad
+        // record and stop every good one behind it.
+        val projectId = parseUuidOrNull(event.projectId)
+        if (projectId == null) {
+            LOG.warn(
+                "fare event has no usable project_id (ride_id='{}'); auditing only",
+                event.rideId,
+            )
+            metrics.unresolved()
+            return auditAndCommit(event, eventTransactionId, rideId)
+        }
+
         if (requiresAction(event.eventType)) {
-            val target = eventTransactionId ?: rideId?.let { lookup.findByRideId(it) }
+            val target = eventTransactionId ?: rideId?.let { lookup.findByRideId(projectId, it) }
             if (target == null) {
                 // Nothing to act on. Either the event named neither a
                 // transaction nor a ride, or the ride has no transaction —
@@ -67,7 +82,7 @@ class FareEventHandler(
                 return auditAndCommit(event, null, rideId)
             }
 
-            when (val result = act(event.eventType, target)) {
+            when (val result = act(projectId, event.eventType, target)) {
                 is CommandResult.Applied ->
                     if (event.eventType == FareEvent.EventType.RIDE_COMPLETED) {
                         metrics.settled()
@@ -104,16 +119,25 @@ class FareEventHandler(
         return auditAndCommit(event, eventTransactionId, rideId)
     }
 
-    private fun act(type: FareEvent.EventType, transactionId: UUID): CommandResult =
+    private fun act(
+        projectId: UUID,
+        type: FareEvent.EventType,
+        transactionId: UUID,
+    ): CommandResult =
         when (type) {
-            FareEvent.EventType.RIDE_COMPLETED -> payments.settle(transactionId)
-            FareEvent.EventType.RIDE_CANCELLED -> payments.refund(transactionId)
+            FareEvent.EventType.RIDE_COMPLETED -> payments.settle(projectId, transactionId)
+            FareEvent.EventType.RIDE_CANCELLED -> payments.refund(projectId, transactionId)
             else -> CommandResult.Applied
         }
 
     private fun auditAndCommit(event: FareEvent, transactionId: UUID?, rideId: UUID?): Outcome {
         val recorded = audit.record(
             AuditEntry(
+                // Nil rather than a guess when the event had no project.
+                // The row still gets written — an event we could not act
+                // on is exactly the kind worth having in an audit log —
+                // and the sentinel makes it findable.
+                projectId = parseUuidOrNull(event.projectId) ?: UNKNOWN_PROJECT,
                 eventKey = eventKey(event),
                 transactionId = transactionId,
                 rideId = rideId,
@@ -130,6 +154,15 @@ class FareEventHandler(
 
     companion object {
         private val LOG = LoggerFactory.getLogger(FareEventHandler::class.java)
+
+        /**
+         * Stand-in project for an audit row whose event carried no usable
+         * project_id. The row is still worth writing — an event nobody
+         * could act on is precisely what an audit log is for — and the
+         * nil UUID makes those rows findable with one query rather than
+         * hiding them among real tenants.
+         */
+        private val UNKNOWN_PROJECT: UUID = UUID(0L, 0L)
 
         /**
          * Events that move money. Everything else is an acknowledgement

@@ -29,21 +29,29 @@ class FareEventHandlerTest {
         val settled = mutableListOf<UUID>()
         val refunded = mutableListOf<UUID>()
 
-        override fun settle(transactionId: UUID): CommandResult {
+        /** Every project a settle was asked for, so tests can assert it. */
+        val settleProjects = mutableListOf<UUID>()
+        val refundProjects = mutableListOf<UUID>()
+
+        override fun settle(projectId: UUID, transactionId: UUID): CommandResult {
             settled += transactionId
+            settleProjects += projectId
             return settleResult
         }
 
-        override fun refund(transactionId: UUID): CommandResult {
+        override fun refund(projectId: UUID, transactionId: UUID): CommandResult {
             refunded += transactionId
+            refundProjects += projectId
             return refundResult
         }
     }
 
     class FakeLookup(private val byRide: Map<UUID, UUID> = emptyMap()) : TransactionLookup {
         val queried = mutableListOf<UUID>()
-        override fun findByRideId(rideId: UUID): UUID? {
+        val queriedProjects = mutableListOf<UUID>()
+        override fun findByRideId(projectId: UUID, rideId: UUID): UUID? {
             queried += rideId
+            queriedProjects += projectId
             return byRide[rideId]
         }
     }
@@ -60,17 +68,21 @@ class FareEventHandlerTest {
     private val rideId = UUID.randomUUID()
     private val txId = UUID.randomUUID()
 
+    private val project = UUID.fromString("11111111-1111-1111-1111-111111111111")
+
     private fun event(
         type: FareEvent.EventType,
         transactionId: String = txId.toString(),
         ride: String = rideId.toString(),
         occurredAt: Long = 1_700_000_000,
+        projectId: String = project.toString(),
     ): FareEvent = FareEvent.newBuilder()
         .setRideId(ride)
         .setTransactionId(transactionId)
         .setEventType(type)
         .setAmountCents(2_500)
         .setOccurredAt(occurredAt)
+        .setProjectId(projectId)
         .build()
 
     private fun handler(
@@ -293,5 +305,55 @@ class FareEventHandlerTest {
         val json = FareEventHandler.payloadJson(nasty)
         assertFalse(json.contains(""""injected":"x""""), "quote was not escaped: $json")
         assertTrue(json.contains("""\""""), "expected an escaped quote in $json")
+    }
+
+    // --- tenancy ----------------------------------------------------------
+
+    /** The project on the event is what settle and refund are scoped to. */
+    @Test
+    fun `the event's project is passed through to payments`() {
+        val payments = FakePayments()
+        val handler = FareEventHandler(payments, FakeLookup(), FakeAudit())
+
+        handler.handle(event(FareEvent.EventType.RIDE_COMPLETED))
+        assertEquals(listOf(project), payments.settleProjects)
+
+        handler.handle(event(FareEvent.EventType.RIDE_CANCELLED))
+        assertEquals(listOf(project), payments.refundProjects)
+    }
+
+    /**
+     * ride_id is opaque to Atlas and chosen by the caller, so the lookup
+     * that resolves it to a transaction has to be scoped — otherwise a
+     * ride could resolve to another tenant's transaction and be settled.
+     */
+    @Test
+    fun `the ride lookup is scoped to the event's project`() {
+        val lookup = FakeLookup(mapOf(rideId to txId))
+        val handler = FareEventHandler(FakePayments(), lookup, FakeAudit())
+
+        handler.handle(event(FareEvent.EventType.RIDE_COMPLETED, transactionId = ""))
+        assertEquals(listOf(project), lookup.queriedProjects)
+    }
+
+    /**
+     * An event with no project cannot be acted on, and retrying cannot
+     * help: a replay carries the same missing field, so a retry would hold
+     * the offset forever and stop every good event behind it. It is
+     * audited and committed instead.
+     */
+    @Test
+    fun `an event without a project is audited but not acted on`() {
+        val payments = FakePayments()
+        val audit = FakeAudit()
+        val handler = FareEventHandler(payments, FakeLookup(), audit)
+
+        val outcome = handler.handle(
+            event(FareEvent.EventType.RIDE_COMPLETED, projectId = ""),
+        )
+
+        assertEquals(FareEventHandler.Outcome.COMMIT, outcome)
+        assertTrue(payments.settled.isEmpty(), "no money may move without a tenant")
+        assertEquals(1, audit.entries.size, "the event is still recorded")
     }
 }

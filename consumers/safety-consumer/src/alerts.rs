@@ -11,12 +11,17 @@ use crate::pb::events::SafetyAlertEvent;
 
 /// Build the wire event for one crossing.
 pub fn alert_event(
+    project_id: Uuid,
     user_id: Uuid,
     geofence_id: Uuid,
     alert_type: AlertType,
     triggered_at: i64,
 ) -> SafetyAlertEvent {
     SafetyAlertEvent {
+        // Carried through from the LocationUpdateEvent that produced this
+        // crossing, so whatever consumes safety alerts downstream inherits
+        // the tenant rather than having to infer it.
+        project_id: project_id.to_string(),
         user_id: user_id.to_string(),
         geofence_id: geofence_id.to_string(),
         alert_type: alert_type as i32,
@@ -66,6 +71,7 @@ pub fn diff(previous: &[Uuid], current: &[Uuid]) -> Transitions {
 /// containing every user — the bug fixed in geo-engine's queries.
 pub async fn fences_containing(
     pool: &sqlx::PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     lat: f64,
     lng: f64,
@@ -74,7 +80,8 @@ pub async fn fences_containing(
         r#"
         SELECT id
         FROM geo.geofences
-        WHERE user_id = $1
+        WHERE project_id = $4
+          AND user_id = $1
           AND active = TRUE
           AND ST_DWithin(
               center::geography,
@@ -87,6 +94,7 @@ pub async fn fences_containing(
     .bind(user_id)
     .bind(lng)
     .bind(lat)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
@@ -144,12 +152,13 @@ pub async fn recorded_memberships(
 pub async fn apply_position(
     pool: &sqlx::PgPool,
     publisher: &impl crate::producer::AlertPublisher,
+    project_id: Uuid,
     user_id: Uuid,
     lat: f64,
     lng: f64,
     occurred_at: i64,
 ) -> anyhow::Result<Transitions> {
-    let current = fences_containing(pool, user_id, lat, lng).await?;
+    let current = fences_containing(pool, project_id, user_id, lat, lng).await?;
 
     let mut tx = pool.begin().await?;
 
@@ -175,6 +184,7 @@ pub async fn apply_position(
     for id in &transitions.entered {
         publisher
             .publish(&alert_event(
+                project_id,
                 user_id,
                 *id,
                 AlertType::GeofenceEntered,
@@ -185,6 +195,7 @@ pub async fn apply_position(
     for id in &transitions.exited {
         publisher
             .publish(&alert_event(
+                project_id,
                 user_id,
                 *id,
                 AlertType::GeofenceExited,
@@ -294,7 +305,13 @@ mod tests {
 
     #[test]
     fn alert_event_carries_the_crossing() {
-        let e = alert_event(id(7), id(9), AlertType::GeofenceEntered, 1_700_000_000);
+        let e = alert_event(
+            id(1),
+            id(7),
+            id(9),
+            AlertType::GeofenceEntered,
+            1_700_000_000,
+        );
         assert_eq!(e.user_id, id(7).to_string());
         assert_eq!(e.geofence_id, id(9).to_string());
         assert_eq!(e.alert_type, AlertType::GeofenceEntered as i32);

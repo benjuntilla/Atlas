@@ -35,17 +35,26 @@ class PaymentsGrpcCommands(
 
     private val stub = PaymentsServiceGrpcKt.PaymentsServiceCoroutineStub(channel)
 
-    override fun settle(transactionId: UUID): CommandResult = call("settle") {
+    override fun settle(projectId: UUID, transactionId: UUID): CommandResult = call("settle") {
         stub.withDeadlineAfter(deadlineSeconds, TimeUnit.SECONDS)
             .settleTransaction(
-                SettleRequest.newBuilder().setTransactionId(transactionId.toString()).build(),
+                SettleRequest.newBuilder()
+                    .setTransactionId(transactionId.toString())
+                    // From the Kafka event, which is the only place a
+                    // consumer can learn its tenant: the request that
+                    // produced the event is long gone.
+                    .setProjectId(projectId.toString())
+                    .build(),
             )
     }
 
-    override fun refund(transactionId: UUID): CommandResult = call("refund") {
+    override fun refund(projectId: UUID, transactionId: UUID): CommandResult = call("refund") {
         stub.withDeadlineAfter(deadlineSeconds, TimeUnit.SECONDS)
             .refundTransaction(
-                RefundRequest.newBuilder().setTransactionId(transactionId.toString()).build(),
+                RefundRequest.newBuilder()
+                    .setTransactionId(transactionId.toString())
+                    .setProjectId(projectId.toString())
+                    .build(),
             )
     }
 

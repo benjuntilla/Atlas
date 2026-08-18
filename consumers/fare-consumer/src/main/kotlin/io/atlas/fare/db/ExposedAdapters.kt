@@ -43,11 +43,17 @@ class ExposedTransactionLookup : TransactionLookup {
      * cancellation refers to. Refunded and failed rows are skipped so a
      * dead earlier attempt cannot shadow the live one.
      */
-    override fun findByRideId(rideId: UUID): UUID? = transaction {
+    override fun findByRideId(projectId: UUID, rideId: UUID): UUID? = transaction {
         Transactions
             .selectAll()
             .where {
-                (Transactions.rideId eq rideId) and
+                // Scoped, and this one is not defensive padding: ride_id
+                // is opaque to Atlas and chosen by the caller, so two
+                // tenants using the same one is normal. Unscoped, this
+                // could resolve a ride to ANOTHER tenant's transaction and
+                // hand it to settle().
+                (Transactions.projectId eq projectId) and
+                    (Transactions.rideId eq rideId) and
                     (Transactions.status inList listOf("pending", "settled"))
             }
             .orderBy(Transactions.createdAt to SortOrder.DESC)
@@ -68,6 +74,7 @@ class ExposedAuditLog : AuditLog {
      */
     override fun record(entry: AuditEntry): Boolean = transaction {
         val inserted = TransactionEvents.insertIgnore {
+            it[projectId] = entry.projectId
             it[transactionId] = entry.transactionId
             it[rideId] = entry.rideId
             it[eventType] = entry.eventType.name

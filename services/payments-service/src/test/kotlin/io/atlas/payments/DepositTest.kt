@@ -27,6 +27,12 @@ import kotlin.test.assertTrue
  * says no partway through.
  */
 class DepositTest {
+
+    // Two tenants, so the scoping can be asserted rather than assumed. A
+    // suite that only ever used one project would pass just as happily
+    // against repositories that ignored projectId entirely.
+    private val projectA: UUID = UUID.fromString("11111111-1111-1111-1111-111111111111")
+    private val projectB: UUID = UUID.fromString("22222222-2222-2222-2222-222222222222")
     private val wallets = InMemoryWalletRepository()
     private val transactions = InMemoryTransactionRepository()
     private val outbox = InMemoryOutbox()
@@ -46,13 +52,13 @@ class DepositTest {
 
     @Test
     fun `deposit credits the wallet and settles immediately`() {
-        val result = service().deposit(user, 5_000, "dep-1")
+        val result = service().deposit(projectA, user, 5_000, "dep-1")
 
         assertEquals(TxStatus.SETTLED, result.status)
         assertEquals(5_000, result.balanceCents)
-        assertEquals(5_000, service().walletBalance(user).balanceCents)
+        assertEquals(5_000, service().walletBalance(projectA, user).balanceCents)
 
-        val record = assertNotNull(transactions.findById(result.transactionId))
+        val record = assertNotNull(transactions.findById(projectA, result.transactionId))
         assertEquals(TxKind.DEPOSIT, record.kind)
         // No source wallet: the money came from outside the platform.
         assertEquals(null, record.fromWallet)
@@ -63,7 +69,7 @@ class DepositTest {
 
     @Test
     fun `deposit emits a settled outbox event in the same transaction`() {
-        val result = service().deposit(user, 2_500, "dep-2")
+        val result = service().deposit(projectA, user, 2_500, "dep-2")
 
         val event = FareEvent.parseFrom(outbox.all().last().payload)
         assertEquals(FareEvent.EventType.TRANSACTION_SETTLED, event.eventType)
@@ -83,46 +89,46 @@ class DepositTest {
         val payee = UUID.randomUUID().toString()
         val svc = service()
 
-        svc.deposit(payer, 10_000, "dep-3")
-        val tx = svc.initiate(payer, payee, 2_500, "tx-1", UUID.randomUUID().toString())
-        svc.settle(tx.transactionId.toString())
+        svc.deposit(projectA, payer, 10_000, "dep-3")
+        val tx = svc.initiate(projectA, payer, payee, 2_500, "tx-1", UUID.randomUUID().toString())
+        svc.settle(projectA, tx.transactionId.toString())
 
-        assertEquals(7_500, svc.walletBalance(payer).balanceCents)
-        assertEquals(2_500, svc.walletBalance(payee).balanceCents)
+        assertEquals(7_500, svc.walletBalance(projectA, payer).balanceCents)
+        assertEquals(2_500, svc.walletBalance(projectA, payee).balanceCents)
     }
 
     @Test
     fun `deposit is idempotent on a repeated key`() {
         val svc = service()
-        val first = svc.deposit(user, 5_000, "dep-same")
-        val second = svc.deposit(user, 5_000, "dep-same")
+        val first = svc.deposit(projectA, user, 5_000, "dep-same")
+        val second = svc.deposit(projectA, user, 5_000, "dep-same")
 
         assertEquals(first.transactionId, second.transactionId)
         // Critically the balance is credited once, not twice.
-        assertEquals(5_000, svc.walletBalance(user).balanceCents)
+        assertEquals(5_000, svc.walletBalance(projectA, user).balanceCents)
     }
 
     @Test
     fun `reusing a key with a different amount is a conflict`() {
         val svc = service()
-        svc.deposit(user, 5_000, "dep-conflict")
+        svc.deposit(projectA, user, 5_000, "dep-conflict")
         // Silently returning the first transaction here would tell the caller
         // their 9999 deposit succeeded when it never happened.
         assertFailsWith<PaymentError.IdempotencyConflict> {
-            svc.deposit(user, 9_999, "dep-conflict")
+            svc.deposit(projectA, user, 9_999, "dep-conflict")
         }
     }
 
     @Test
     fun `deposit rejects non-positive amounts`() {
         val svc = service()
-        assertFailsWith<PaymentError.InvalidAmount> { svc.deposit(user, 0, "dep-zero") }
-        assertFailsWith<PaymentError.InvalidAmount> { svc.deposit(user, -100, "dep-neg") }
+        assertFailsWith<PaymentError.InvalidAmount> { svc.deposit(projectA, user, 0, "dep-zero") }
+        assertFailsWith<PaymentError.InvalidAmount> { svc.deposit(projectA, user, -100, "dep-neg") }
     }
 
     @Test
     fun `deposit requires an idempotency key`() {
-        assertFailsWith<PaymentError.InvalidArgument> { service().deposit(user, 100, "  ") }
+        assertFailsWith<PaymentError.InvalidArgument> { service().deposit(projectA, user, 100, "  ") }
     }
 
     @Test
@@ -133,11 +139,11 @@ class DepositTest {
         }
 
         assertFailsWith<PaymentError.ProviderDeclined> {
-            service(declining).deposit(user, 5_000, "dep-declined")
+            service(declining).deposit(projectA, user, 5_000, "dep-declined")
         }
-        assertEquals(0, service().walletBalance(user).balanceCents)
+        assertEquals(0, service().walletBalance(projectA, user).balanceCents)
         // Nothing was written, so the key is still free for a real retry.
-        assertEquals(null, transactions.findByIdempotencyKey("dep-declined"))
+        assertEquals(null, transactions.findByIdempotencyKey(projectA, "dep-declined"))
     }
 
     /**
@@ -154,11 +160,11 @@ class DepositTest {
         }
 
         assertFailsWith<PaymentError.ProviderDeclined> {
-            service(failsCapture).deposit(user, 5_000, "dep-capture-fail")
+            service(failsCapture).deposit(projectA, user, 5_000, "dep-capture-fail")
         }
 
-        assertEquals(0, service().walletBalance(user).balanceCents)
-        val record = assertNotNull(transactions.findByIdempotencyKey("dep-capture-fail"))
+        assertEquals(0, service().walletBalance(projectA, user).balanceCents)
+        val record = assertNotNull(transactions.findByIdempotencyKey(projectA, "dep-capture-fail"))
         assertEquals(TxStatus.FAILED, record.status)
         // The provider reference survives, which is what a human or a sweep
         // needs to ask the provider what actually happened to the charge.

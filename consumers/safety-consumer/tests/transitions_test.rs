@@ -32,23 +32,58 @@ async fn pool() -> PgPool {
         .expect("connect to local postgres — is docker compose up?")
 }
 
-async fn seed_user(pool: &PgPool) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO auth.users (id, email, password_hash) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(format!("safety-{id}@atlas.dev"))
-        .bind("$2a$04$abcdefghijklmnopqrstuv")
+/// A real project to hang test rows off. Geofences and users both belong
+/// to one, and the tests need genuine ids rather than the bootstrap
+/// default so scoping can be asserted rather than assumed.
+async fn seed_project(pool: &PgPool) -> Uuid {
+    let account = Uuid::new_v4();
+    let project = Uuid::new_v4();
+    sqlx::query("INSERT INTO control.accounts (id, email) VALUES ($1, $2)")
+        .bind(account)
+        .bind(format!("{account}@safety.test"))
         .execute(pool)
         .await
-        .expect("seed auth.users");
+        .expect("seed control.accounts");
+    sqlx::query(
+        "INSERT INTO control.projects (id, account_id, name, region, environment, endpoint)
+         VALUES ($1, $2, $3, 'local', 'development', '')",
+    )
+    .bind(project)
+    .bind(account)
+    .bind(format!("safety-{project}"))
+    .execute(pool)
+    .await
+    .expect("seed control.projects");
+    project
+}
+
+async fn seed_user(pool: &PgPool, project_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO auth.users (id, project_id, email, password_hash) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(format!("safety-{id}@atlas.dev"))
+    .bind("$2a$04$abcdefghijklmnopqrstuv")
+    .execute(pool)
+    .await
+    .expect("seed auth.users");
     id
 }
 
-async fn seed_fence(pool: &PgPool, user_id: Uuid, lat: f64, lng: f64, radius_m: f64) -> Uuid {
+async fn seed_fence(
+    pool: &PgPool,
+    project_id: Uuid,
+    user_id: Uuid,
+    lat: f64,
+    lng: f64,
+    radius_m: f64,
+) -> Uuid {
     let row: (Uuid,) = sqlx::query_as(
         r#"
-        INSERT INTO geo.geofences (user_id, label, center, radius_m)
-        VALUES ($1, 'test', ST_SetSRID(ST_MakePoint($2, $3), 4326), $4)
+        INSERT INTO geo.geofences (project_id, user_id, label, center, radius_m)
+        VALUES ($5, $1, 'test', ST_SetSRID(ST_MakePoint($2, $3), 4326), $4)
         RETURNING id
         "#,
     )
@@ -56,6 +91,7 @@ async fn seed_fence(pool: &PgPool, user_id: Uuid, lat: f64, lng: f64, radius_m: 
     .bind(lng)
     .bind(lat)
     .bind(radius_m)
+    .bind(project_id)
     .fetch_one(pool)
     .await
     .expect("seed geofence");
@@ -66,30 +102,47 @@ async fn seed_fence(pool: &PgPool, user_id: Uuid, lat: f64, lng: f64, radius_m: 
 #[ignore]
 async fn entering_then_leaving_emits_one_alert_each() {
     let pool = pool().await;
-    let user = seed_user(&pool).await;
-    let fence = seed_fence(&pool, user, CENTER.0, CENTER.1, 250.0).await;
+    let project = seed_project(&pool).await;
+    let user = seed_user(&pool, project).await;
+    let fence = seed_fence(&pool, project, user, CENTER.0, CENTER.1, 250.0).await;
     let publisher = RecordingAlertPublisher::default();
 
     // Arrive at the centre.
-    let t = alerts::apply_position(&pool, &publisher, user, CENTER.0, CENTER.1, NOW)
+    let t = alerts::apply_position(&pool, &publisher, project, user, CENTER.0, CENTER.1, NOW)
         .await
         .expect("apply arrival");
     assert_eq!(t.entered, vec![fence]);
     assert!(t.exited.is_empty());
 
     // Ping again without moving: no second alert.
-    let t = alerts::apply_position(&pool, &publisher, user, CENTER.0, CENTER.1, NOW + 10)
-        .await
-        .expect("apply stationary ping");
+    let t = alerts::apply_position(
+        &pool,
+        &publisher,
+        project,
+        user,
+        CENTER.0,
+        CENTER.1,
+        NOW + 10,
+    )
+    .await
+    .expect("apply stationary ping");
     assert!(
         t.is_empty(),
         "a stationary ping must not re-alert, got {t:?}"
     );
 
     // Leave.
-    let t = alerts::apply_position(&pool, &publisher, user, FAR_AWAY.0, FAR_AWAY.1, NOW + 20)
-        .await
-        .expect("apply departure");
+    let t = alerts::apply_position(
+        &pool,
+        &publisher,
+        project,
+        user,
+        FAR_AWAY.0,
+        FAR_AWAY.1,
+        NOW + 20,
+    )
+    .await
+    .expect("apply departure");
     assert_eq!(t.exited, vec![fence]);
     assert!(t.entered.is_empty());
 
@@ -108,15 +161,16 @@ async fn entering_then_leaving_emits_one_alert_each() {
 #[ignore]
 async fn fence_radius_is_meters() {
     let pool = pool().await;
-    let user = seed_user(&pool).await;
-    seed_fence(&pool, user, CENTER.0, CENTER.1, 250.0).await;
+    let project = seed_project(&pool).await;
+    let user = seed_user(&pool, project).await;
+    seed_fence(&pool, project, user, CENTER.0, CENTER.1, 250.0).await;
 
-    let inside = alerts::fences_containing(&pool, user, CENTER.0, CENTER.1)
+    let inside = alerts::fences_containing(&pool, project, user, CENTER.0, CENTER.1)
         .await
         .expect("query inside");
     assert_eq!(inside.len(), 1);
 
-    let outside = alerts::fences_containing(&pool, user, FAR_AWAY.0, FAR_AWAY.1)
+    let outside = alerts::fences_containing(&pool, project, user, FAR_AWAY.0, FAR_AWAY.1)
         .await
         .expect("query outside");
     assert!(
@@ -131,14 +185,17 @@ async fn fence_radius_is_meters() {
 #[ignore]
 async fn fences_are_scoped_to_their_owner() {
     let pool = pool().await;
-    let owner = seed_user(&pool).await;
-    let stranger = seed_user(&pool).await;
-    seed_fence(&pool, owner, CENTER.0, CENTER.1, 250.0).await;
+    let project = seed_project(&pool).await;
+    let owner = seed_user(&pool, project).await;
+    let stranger = seed_user(&pool, project).await;
+    seed_fence(&pool, project, owner, CENTER.0, CENTER.1, 250.0).await;
 
     let publisher = RecordingAlertPublisher::default();
-    let t = alerts::apply_position(&pool, &publisher, stranger, CENTER.0, CENTER.1, NOW)
-        .await
-        .expect("apply");
+    let t = alerts::apply_position(
+        &pool, &publisher, project, stranger, CENTER.0, CENTER.1, NOW,
+    )
+    .await
+    .expect("apply");
 
     assert!(
         t.is_empty(),
@@ -153,11 +210,12 @@ async fn fences_are_scoped_to_their_owner() {
 #[ignore]
 async fn deactivating_a_fence_exits_its_members() {
     let pool = pool().await;
-    let user = seed_user(&pool).await;
-    let fence = seed_fence(&pool, user, CENTER.0, CENTER.1, 250.0).await;
+    let project = seed_project(&pool).await;
+    let user = seed_user(&pool, project).await;
+    let fence = seed_fence(&pool, project, user, CENTER.0, CENTER.1, 250.0).await;
     let publisher = RecordingAlertPublisher::default();
 
-    alerts::apply_position(&pool, &publisher, user, CENTER.0, CENTER.1, NOW)
+    alerts::apply_position(&pool, &publisher, project, user, CENTER.0, CENTER.1, NOW)
         .await
         .expect("enter");
 
@@ -167,9 +225,17 @@ async fn deactivating_a_fence_exits_its_members() {
         .await
         .expect("deactivate");
 
-    let t = alerts::apply_position(&pool, &publisher, user, CENTER.0, CENTER.1, NOW + 10)
-        .await
-        .expect("ping after deactivation");
+    let t = alerts::apply_position(
+        &pool,
+        &publisher,
+        project,
+        user,
+        CENTER.0,
+        CENTER.1,
+        NOW + 10,
+    )
+    .await
+    .expect("ping after deactivation");
     assert_eq!(t.exited, vec![fence]);
 }
 
@@ -180,11 +246,13 @@ async fn deactivating_a_fence_exits_its_members() {
 #[ignore]
 async fn failed_publish_rolls_back_membership() {
     let pool = pool().await;
-    let user = seed_user(&pool).await;
-    let fence = seed_fence(&pool, user, CENTER.0, CENTER.1, 250.0).await;
+    let project = seed_project(&pool).await;
+    let user = seed_user(&pool, project).await;
+    let fence = seed_fence(&pool, project, user, CENTER.0, CENTER.1, 250.0).await;
 
     let failing = RecordingAlertPublisher::failing();
-    let result = alerts::apply_position(&pool, &failing, user, CENTER.0, CENTER.1, NOW).await;
+    let result =
+        alerts::apply_position(&pool, &failing, project, user, CENTER.0, CENTER.1, NOW).await;
     assert!(result.is_err(), "publish failure must surface as an error");
 
     let recorded = alerts::recorded_memberships(&pool, user)
@@ -197,7 +265,7 @@ async fn failed_publish_rolls_back_membership() {
 
     // The retry succeeds and emits the alert that was nearly lost.
     let ok = RecordingAlertPublisher::default();
-    let t = alerts::apply_position(&pool, &ok, user, CENTER.0, CENTER.1, NOW)
+    let t = alerts::apply_position(&pool, &ok, project, user, CENTER.0, CENTER.1, NOW)
         .await
         .expect("retry");
     assert_eq!(t.entered, vec![fence]);

@@ -21,8 +21,8 @@ import java.util.UUID
  * table.
  */
 interface PaymentsCommands {
-    fun settle(transactionId: UUID): CommandResult
-    fun refund(transactionId: UUID): CommandResult
+    fun settle(projectId: UUID, transactionId: UUID): CommandResult
+    fun refund(projectId: UUID, transactionId: UUID): CommandResult
 }
 
 /**
@@ -53,7 +53,7 @@ sealed interface CommandResult {
  * knows its ride id and nothing about Atlas transaction ids.
  */
 interface TransactionLookup {
-    fun findByRideId(rideId: UUID): UUID?
+    fun findByRideId(projectId: UUID, rideId: UUID): UUID?
 }
 
 /** The payments.transaction_events audit log. */
@@ -67,6 +67,7 @@ interface AuditLog {
 }
 
 data class AuditEntry(
+    val projectId: UUID,
     val eventKey: String,
     val transactionId: UUID?,
     val rideId: UUID?,

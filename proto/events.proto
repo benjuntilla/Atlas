@@ -15,11 +15,19 @@ option java_package = "atlas.events";
 //   atlas.safety.alerts    -> SafetyAlertEvent
 //   atlas.elo.recompute    -> EloRecomputeEvent
 
+// Every event carries the project it happened in.
+//
+// Consumers act on these asynchronously, long after the request that
+// produced them has gone, so they cannot re-derive the tenant from a
+// header or a token — it has to travel with the event. Without it a
+// consumer's only options are to guess or to query unscoped, and the
+// second one looks like it works.
 message LocationUpdateEvent {
   string user_id = 1;
   double lat = 2;
   double lng = 3;
   int64  recorded_at = 4; // unix epoch seconds
+  string project_id = 5;
 }
 
 message FareEvent {
@@ -28,6 +36,7 @@ message FareEvent {
   EventType event_type = 3;
   int64  amount_cents = 4;
   int64  occurred_at = 5;
+  string project_id = 6;
 
   enum EventType {
     UNKNOWN = 0;
@@ -45,6 +54,7 @@ message AuthTokenEvent {
   string session_id = 3;
   EventType event_type = 4;
   int64  occurred_at = 5;
+  string project_id = 6;
 
   enum EventType {
     UNKNOWN = 0;
@@ -58,6 +68,7 @@ message SafetyAlertEvent {
   string geofence_id = 2;
   AlertType alert_type = 3;
   int64  triggered_at = 4;
+  string project_id = 5;
 
   enum AlertType {
     UNKNOWN = 0;
@@ -70,6 +81,7 @@ message EloRecomputeEvent {
   repeated string segment_ids = 1;
   TriggerType trigger_type = 2;
   int64  occurred_at = 3;
+  string project_id = 4;
 
   enum TriggerType {
     UNKNOWN = 0;

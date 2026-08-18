@@ -12,11 +12,19 @@ import io.atlas.payments.fakes.InMemoryWalletRepository
 import java.util.UUID
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class PaymentsServiceTest {
+
+    // Two tenants, so the scoping can be asserted rather than assumed. A
+    // suite that only ever used one project would pass just as happily
+    // against repositories that ignored projectId entirely.
+    private val projectA: UUID = UUID.fromString("11111111-1111-1111-1111-111111111111")
+    private val projectB: UUID = UUID.fromString("22222222-2222-2222-2222-222222222222")
     private val wallets = InMemoryWalletRepository()
     private val transactions = InMemoryTransactionRepository()
     private val outbox = InMemoryOutbox()
@@ -42,10 +50,10 @@ class PaymentsServiceTest {
 
     @Test
     fun `initiate creates a pending transaction and a RIDE_ACCEPTED outbox event`() {
-        val result = service.initiate(rider, driver, 1500, "key-1", ride)
+        val result = service.initiate(projectA, rider, driver, 1500, "key-1", ride)
 
         assertEquals(TxStatus.PENDING, result.status)
-        val tx = transactions.findById(result.transactionId)!!
+        val tx = transactions.findById(projectA, result.transactionId)!!
         assertEquals(1500, tx.amountCents)
         assertEquals(TxStatus.PENDING, tx.status)
         assertTrue(tx.providerRef!!.startsWith("fake_"))
@@ -55,8 +63,8 @@ class PaymentsServiceTest {
 
     @Test
     fun `initiate is idempotent for the same key and args`() {
-        val first = service.initiate(rider, driver, 1500, "key-1", ride)
-        val second = service.initiate(rider, driver, 1500, "key-1", ride)
+        val first = service.initiate(projectA, rider, driver, 1500, "key-1", ride)
+        val second = service.initiate(projectA, rider, driver, 1500, "key-1", ride)
 
         assertEquals(first.transactionId, second.transactionId)
         assertEquals(1, outbox.all().size) // replay does not enqueue again
@@ -64,30 +72,30 @@ class PaymentsServiceTest {
 
     @Test
     fun `initiate rejects a reused key with different args`() {
-        service.initiate(rider, driver, 1500, "key-1", ride)
+        service.initiate(projectA, rider, driver, 1500, "key-1", ride)
         assertFailsWith<PaymentError.IdempotencyConflict> {
-            service.initiate(rider, driver, 9999, "key-1", ride)
+            service.initiate(projectA, rider, driver, 9999, "key-1", ride)
         }
     }
 
     @Test
     fun `initiate rejects a non-positive amount`() {
         assertFailsWith<PaymentError.InvalidAmount> {
-            service.initiate(rider, driver, 0, "key-1", ride)
+            service.initiate(projectA, rider, driver, 0, "key-1", ride)
         }
     }
 
     @Test
     fun `initiate rejects identical payer and payee`() {
         assertFailsWith<PaymentError.InvalidArgument> {
-            service.initiate(rider, rider, 1500, "key-1", ride)
+            service.initiate(projectA, rider, rider, 1500, "key-1", ride)
         }
     }
 
     @Test
     fun `initiate rejects a non-uuid user id`() {
         assertFailsWith<PaymentError.InvalidArgument> {
-            service.initiate("not-a-uuid", driver, 1500, "key-1", ride)
+            service.initiate(projectA, "not-a-uuid", driver, 1500, "key-1", ride)
         }
     }
 
@@ -95,27 +103,27 @@ class PaymentsServiceTest {
 
     @Test
     fun `settle moves balances and emits TRANSACTION_SETTLED`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
         // Fund the payer so the capture has something to move.
-        wallets.adjustBalance(tx.fromWallet!!, 5000)
+        wallets.adjustBalance(projectA, tx.fromWallet!!, 5000)
 
-        val result = service.settle(tx.id.toString())
+        val result = service.settle(projectA, tx.id.toString())
 
         assertTrue(result.success)
         assertEquals(TxStatus.SETTLED, result.status)
-        assertEquals(3500, wallets.findById(tx.fromWallet!!)!!.balanceCents)
-        assertEquals(1500, wallets.findById(tx.toWallet!!)!!.balanceCents)
+        assertEquals(3500, wallets.findById(projectA, tx.fromWallet!!)!!.balanceCents)
+        assertEquals(1500, wallets.findById(projectA, tx.toWallet!!)!!.balanceCents)
         assertEquals(FareEvent.EventType.TRANSACTION_SETTLED, lastEventType())
     }
 
     @Test
     fun `settle is idempotent`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
-        wallets.adjustBalance(tx.fromWallet!!, 5000)
-        service.settle(tx.id.toString())
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
+        wallets.adjustBalance(projectA, tx.fromWallet!!, 5000)
+        service.settle(projectA, tx.id.toString())
         val outboxAfterFirst = outbox.all().size
 
-        val again = service.settle(tx.id.toString())
+        val again = service.settle(projectA, tx.id.toString())
 
         assertTrue(again.success)
         assertEquals(outboxAfterFirst, outbox.all().size) // no second event
@@ -123,17 +131,17 @@ class PaymentsServiceTest {
 
     @Test
     fun `settle rejects insufficient funds`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
         // Payer wallet left at zero balance.
         assertFailsWith<PaymentError.InsufficientFunds> {
-            service.settle(tx.id.toString())
+            service.settle(projectA, tx.id.toString())
         }
     }
 
     @Test
     fun `settle of an unknown transaction is NOT_FOUND`() {
         assertFailsWith<PaymentError.TransactionNotFound> {
-            service.settle(UUID.randomUUID().toString())
+            service.settle(projectA, UUID.randomUUID().toString())
         }
     }
 
@@ -141,24 +149,24 @@ class PaymentsServiceTest {
 
     @Test
     fun `refund reverses a settled transaction and emits TRANSACTION_REFUNDED`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
-        wallets.adjustBalance(tx.fromWallet!!, 5000)
-        service.settle(tx.id.toString())
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
+        wallets.adjustBalance(projectA, tx.fromWallet!!, 5000)
+        service.settle(projectA, tx.id.toString())
 
-        val result = service.refund(tx.id.toString())
+        val result = service.refund(projectA, tx.id.toString())
 
         assertTrue(result.success)
-        assertEquals(TxStatus.REFUNDED, transactions.findById(tx.id)!!.status)
-        assertEquals(5000, wallets.findById(tx.fromWallet!!)!!.balanceCents) // refunded back
-        assertEquals(0, wallets.findById(tx.toWallet!!)!!.balanceCents)
+        assertEquals(TxStatus.REFUNDED, transactions.findById(projectA, tx.id)!!.status)
+        assertEquals(5000, wallets.findById(projectA, tx.fromWallet!!)!!.balanceCents) // refunded back
+        assertEquals(0, wallets.findById(projectA, tx.toWallet!!)!!.balanceCents)
         assertEquals(FareEvent.EventType.TRANSACTION_REFUNDED, lastEventType())
     }
 
     @Test
     fun `refund of a pending transaction is rejected`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
         assertFailsWith<PaymentError.InvalidState> {
-            service.refund(tx.id.toString())
+            service.refund(projectA, tx.id.toString())
         }
     }
 
@@ -166,17 +174,87 @@ class PaymentsServiceTest {
 
     @Test
     fun `walletBalance returns zero for an unknown user`() {
-        val balance = service.walletBalance(UUID.randomUUID().toString())
+        val balance = service.walletBalance(projectA, UUID.randomUUID().toString())
         assertEquals(0, balance.balanceCents)
         assertEquals("USD", balance.currency)
     }
 
     @Test
     fun `walletBalance reflects a credited wallet`() {
-        val tx = transactions.findById(service.initiate(rider, driver, 1500, "key-1", ride).transactionId)!!
-        wallets.adjustBalance(tx.fromWallet!!, 5000)
-        val balance = service.walletBalance(rider)
+        val tx = transactions.findById(projectA, service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId)!!
+        wallets.adjustBalance(projectA, tx.fromWallet!!, 5000)
+        val balance = service.walletBalance(projectA, rider)
         assertEquals(5000, balance.balanceCents)
+    }
+
+    // --- tenancy ----------------------------------------------------------
+    //
+    // Everything above uses one project, so all of it would pass against
+    // repositories that ignored projectId entirely. These would not.
+
+    /**
+     * The dangerous one.
+     *
+     * Idempotency keys are chosen by the caller — "order-1" is the string
+     * every integration reaches for first — and while the unique index was
+     * global, the second tenant to use it did not get an error. It got the
+     * FIRST tenant's transaction handed back as a successful idempotent
+     * replay: someone else's payment, reported as a success.
+     */
+    @Test
+    fun `the same idempotency key in two projects is two transactions`() {
+        val a = service.initiate(projectA, rider, driver, 1500, "order-1", ride)
+        val b = service.initiate(projectB, rider, driver, 9999, "order-1", ride)
+
+        assertNotEquals(
+            a.transactionId,
+            b.transactionId,
+            "each project must get its own transaction for the same key",
+        )
+        assertEquals(1500, transactions.findById(projectA, a.transactionId)!!.amountCents)
+        assertEquals(9999, transactions.findById(projectB, b.transactionId)!!.amountCents)
+    }
+
+    /** Scoping the key must not weaken idempotency inside one project. */
+    @Test
+    fun `the same idempotency key within one project is still one transaction`() {
+        val first = service.initiate(projectA, rider, driver, 1500, "order-1", ride)
+        val second = service.initiate(projectA, rider, driver, 1500, "order-1", ride)
+        assertEquals(first.transactionId, second.transactionId)
+    }
+
+    /**
+     * Wallets are per project too. The same user id in two projects is two
+     * people with two balances — which is the only coherent reading once
+     * users themselves are scoped.
+     */
+    @Test
+    fun `wallets do not leak between projects`() {
+        val tx = transactions.findById(
+            projectA,
+            service.initiate(projectA, rider, driver, 1500, "key-1", ride).transactionId,
+        )!!
+        wallets.adjustBalance(projectA, tx.fromWallet!!, 5000)
+
+        assertEquals(5000, service.walletBalance(projectA, rider).balanceCents)
+        assertEquals(
+            0,
+            service.walletBalance(projectB, rider).balanceCents,
+            "the same user id in another project must have its own wallet",
+        )
+    }
+
+    /** A transaction id from one project must be invisible to another. */
+    @Test
+    fun `a transaction cannot be settled from another project`() {
+        val tx = service.initiate(projectA, rider, driver, 1500, "key-1", ride)
+        assertNull(
+            transactions.findById(projectB, tx.transactionId),
+            "another project must not be able to read this transaction",
+        )
+        assertFailsWith<PaymentError.TransactionNotFound> {
+            service.settle(projectB, tx.transactionId.toString())
+        }
     }
 
     @AfterTest

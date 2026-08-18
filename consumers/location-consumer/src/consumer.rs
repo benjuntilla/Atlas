@@ -139,6 +139,7 @@ mod tests {
     #[test]
     fn well_formed_event_decodes() {
         let event = LocationUpdateEvent {
+            project_id: "11111111-1111-1111-1111-111111111111".to_string(),
             user_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             lat: 33.4484,
             lng: -112.0740,

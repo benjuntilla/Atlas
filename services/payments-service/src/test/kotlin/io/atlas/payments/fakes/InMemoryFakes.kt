@@ -24,44 +24,58 @@ class DirectTransactionRunner : TransactionRunner {
     override fun <T> run(block: () -> T): T = block()
 }
 
+/**
+ * Keyed by (project, user) and (project, wallet) rather than by user or
+ * wallet alone.
+ *
+ * A fake that enforces a weaker rule than the database lets a scoping bug
+ * pass in tests and fail in production, which is the wrong way round: the
+ * whole value of a test double is that it says no in the same places the
+ * real thing does.
+ */
 class InMemoryWalletRepository : WalletRepository {
-    private val byId = linkedMapOf<UUID, Wallet>()
-    private val userToId = linkedMapOf<UUID, UUID>()
+    private val byId = linkedMapOf<Pair<UUID, UUID>, Wallet>()
+    private val userToId = linkedMapOf<Pair<UUID, UUID>, UUID>()
 
     @Synchronized
-    override fun getOrCreateByUser(userId: UUID): Wallet {
-        userToId[userId]?.let { return byId.getValue(it) }
+    override fun getOrCreateByUser(projectId: UUID, userId: UUID): Wallet {
+        userToId[projectId to userId]?.let { return byId.getValue(projectId to it) }
         val wallet = Wallet(UUID.randomUUID(), userId, 0, "USD")
-        byId[wallet.id] = wallet
-        userToId[userId] = wallet.id
+        byId[projectId to wallet.id] = wallet
+        userToId[projectId to userId] = wallet.id
         return wallet
     }
 
     @Synchronized
-    override fun findByUser(userId: UUID): Wallet? = userToId[userId]?.let { byId[it] }
+    override fun findByUser(projectId: UUID, userId: UUID): Wallet? =
+        userToId[projectId to userId]?.let { byId[projectId to it] }
 
     @Synchronized
-    override fun findById(id: UUID): Wallet? = byId[id]
+    override fun findById(projectId: UUID, id: UUID): Wallet? = byId[projectId to id]
 
     @Synchronized
-    override fun adjustBalance(walletId: UUID, deltaCents: Long) {
-        val wallet = byId.getValue(walletId)
-        byId[walletId] = wallet.copy(balanceCents = wallet.balanceCents + deltaCents)
+    override fun adjustBalance(projectId: UUID, walletId: UUID, deltaCents: Long) {
+        val wallet = byId.getValue(projectId to walletId)
+        byId[projectId to walletId] = wallet.copy(balanceCents = wallet.balanceCents + deltaCents)
     }
 }
 
 class InMemoryTransactionRepository : TransactionRepository {
-    private val byId = linkedMapOf<UUID, TxRecord>()
-    private val keyToId = linkedMapOf<String, UUID>()
+    private val byId = linkedMapOf<Pair<UUID, UUID>, TxRecord>()
+
+    /** (project, key), matching `transactions_project_idempotency_key`. */
+    private val keyToId = linkedMapOf<Pair<UUID, String>, UUID>()
 
     @Synchronized
-    override fun findByIdempotencyKey(key: String): TxRecord? = keyToId[key]?.let { byId[it] }
+    override fun findByIdempotencyKey(projectId: UUID, key: String): TxRecord? =
+        keyToId[projectId to key]?.let { byId[projectId to it] }
 
     @Synchronized
-    override fun findById(id: UUID): TxRecord? = byId[id]
+    override fun findById(projectId: UUID, id: UUID): TxRecord? = byId[projectId to id]
 
     @Synchronized
     override fun insertPending(
+        projectId: UUID,
         fromWallet: UUID?,
         toWallet: UUID?,
         amountCents: Long,
@@ -71,7 +85,9 @@ class InMemoryTransactionRepository : TransactionRepository {
         argsHash: String?,
         kind: String,
     ): TxRecord {
-        if (keyToId.containsKey(idempotencyKey)) throw DuplicateIdempotencyKey(idempotencyKey)
+        if (keyToId.containsKey(projectId to idempotencyKey)) {
+            throw DuplicateIdempotencyKey(idempotencyKey)
+        }
         val record = TxRecord(
             id = UUID.randomUUID(),
             fromWallet = fromWallet,
@@ -84,24 +100,24 @@ class InMemoryTransactionRepository : TransactionRepository {
             idempotencyArgsHash = argsHash,
             kind = kind,
         )
-        byId[record.id] = record
-        keyToId[idempotencyKey] = record.id
+        byId[projectId to record.id] = record
+        keyToId[projectId to idempotencyKey] = record.id
         return record
     }
 
     @Synchronized
-    override fun markSettled(id: UUID, settledAt: Instant) {
-        byId[id] = byId.getValue(id).copy(status = TxStatus.SETTLED)
+    override fun markSettled(projectId: UUID, id: UUID, settledAt: Instant) {
+        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.SETTLED)
     }
 
     @Synchronized
-    override fun markRefunded(id: UUID) {
-        byId[id] = byId.getValue(id).copy(status = TxStatus.REFUNDED)
+    override fun markRefunded(projectId: UUID, id: UUID) {
+        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.REFUNDED)
     }
 
     @Synchronized
-    override fun markFailed(id: UUID, reason: String) {
-        byId[id] = byId.getValue(id).copy(status = TxStatus.FAILED)
+    override fun markFailed(projectId: UUID, id: UUID, reason: String) {
+        byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.FAILED)
     }
 }
 
