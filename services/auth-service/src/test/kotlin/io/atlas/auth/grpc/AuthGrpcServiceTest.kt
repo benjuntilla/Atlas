@@ -30,6 +30,11 @@ import kotlin.test.assertTrue
 
 class AuthGrpcServiceTest {
 
+    // The gateway injects this on every call. Tests must too, because the
+    // service rejects an absent project rather than defaulting — see
+    // `toProjectId`.
+    private val project: String = "11111111-1111-1111-1111-111111111111"
+
     private fun newHarness(
         now: Instant = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS),
     ): Harness {
@@ -73,7 +78,7 @@ class AuthGrpcServiceTest {
     fun `register returns a UUID on success`() = runTest {
         val h = newHarness()
         val resp = h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
@@ -85,7 +90,7 @@ class AuthGrpcServiceTest {
     @Test
     fun `register duplicate maps to ALREADY_EXISTS`() = runTest {
         val h = newHarness()
-        val req = RegisterRequest.newBuilder()
+        val req = RegisterRequest.newBuilder().setProjectId(project)
             .setEmail("alice@example.com")
             .setPassword("correct-horse-battery-staple")
             .build()
@@ -99,7 +104,7 @@ class AuthGrpcServiceTest {
         val h = newHarness()
         val ex = assertFailsWith<StatusException> {
             h.grpc.register(
-                RegisterRequest.newBuilder().setEmail("not-an-email").setPassword("correct-horse-battery-staple").build()
+                RegisterRequest.newBuilder().setProjectId(project).setEmail("not-an-email").setPassword("correct-horse-battery-staple").build()
             )
         }
         assertEquals(Status.INVALID_ARGUMENT.code, ex.status.code)
@@ -110,7 +115,7 @@ class AuthGrpcServiceTest {
         val h = newHarness()
         val ex = assertFailsWith<StatusException> {
             h.grpc.register(
-                RegisterRequest.newBuilder().setEmail("u@x.com").setPassword("short").build()
+                RegisterRequest.newBuilder().setProjectId(project).setEmail("u@x.com").setPassword("short").build()
             )
         }
         assertEquals(Status.INVALID_ARGUMENT.code, ex.status.code)
@@ -122,13 +127,13 @@ class AuthGrpcServiceTest {
     fun `authenticate happy path returns token, publishes ISSUED, caches`() = runTest {
         val h = newHarness()
         h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
         )
         val resp = h.grpc.authenticate(
-            AuthRequest.newBuilder()
+            AuthRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .setLat(33.4484)
@@ -148,14 +153,14 @@ class AuthGrpcServiceTest {
     fun `authenticate wrong password maps to UNAUTHENTICATED`() = runTest {
         val h = newHarness()
         h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
         )
         val ex = assertFailsWith<StatusException> {
             h.grpc.authenticate(
-                AuthRequest.newBuilder()
+                AuthRequest.newBuilder().setProjectId(project)
                     .setEmail("alice@example.com")
                     .setPassword("wrong-password")
                     .build()
@@ -171,7 +176,7 @@ class AuthGrpcServiceTest {
     fun `issueToken rejects non-UUID with INVALID_ARGUMENT`() = runTest {
         val h = newHarness()
         val ex = assertFailsWith<StatusException> {
-            h.grpc.issueToken(IssueTokenRequest.newBuilder().setUserId("not-a-uuid").build())
+            h.grpc.issueToken(IssueTokenRequest.newBuilder().setProjectId(project).setUserId("not-a-uuid").build())
         }
         assertEquals(Status.INVALID_ARGUMENT.code, ex.status.code)
     }
@@ -180,7 +185,7 @@ class AuthGrpcServiceTest {
     fun `issueToken for unknown user maps to UNAUTHENTICATED`() = runTest {
         val h = newHarness()
         val ex = assertFailsWith<StatusException> {
-            h.grpc.issueToken(IssueTokenRequest.newBuilder().setUserId(UUID.randomUUID().toString()).build())
+            h.grpc.issueToken(IssueTokenRequest.newBuilder().setProjectId(project).setUserId(UUID.randomUUID().toString()).build())
         }
         assertEquals(Status.UNAUTHENTICATED.code, ex.status.code)
     }
@@ -191,13 +196,13 @@ class AuthGrpcServiceTest {
     fun `validateToken returns claims for a fresh token`() = runTest {
         val h = newHarness()
         val regResp = h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
         )
         val authResp = h.grpc.authenticate(
-            AuthRequest.newBuilder()
+            AuthRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
@@ -211,13 +216,13 @@ class AuthGrpcServiceTest {
     fun `validateToken rejects revoked session with PERMISSION_DENIED`() = runTest {
         val h = newHarness()
         h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
         )
         val authResp = h.grpc.authenticate(
-            AuthRequest.newBuilder()
+            AuthRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
@@ -246,13 +251,13 @@ class AuthGrpcServiceTest {
     fun `revokeToken on valid token returns success and publishes REVOKED`() = runTest {
         val h = newHarness()
         h.grpc.register(
-            RegisterRequest.newBuilder()
+            RegisterRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()
         )
         val authResp = h.grpc.authenticate(
-            AuthRequest.newBuilder()
+            AuthRequest.newBuilder().setProjectId(project)
                 .setEmail("alice@example.com")
                 .setPassword("correct-horse-battery-staple")
                 .build()

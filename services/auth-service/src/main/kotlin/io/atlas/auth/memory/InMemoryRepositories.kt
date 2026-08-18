@@ -16,17 +16,32 @@ import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryUserRepository(private val clock: Clock = Clock.systemUTC()) : UserRepository {
     private val byId = ConcurrentHashMap<UUID, User>()
-    private val byEmail = ConcurrentHashMap<String, UUID>()
 
-    override fun findByEmail(email: String): User? = byEmail[email]?.let { byId[it] }
+    /**
+     * Keyed by (project, email) rather than email, mirroring the
+     * `users_project_email_key` constraint. A test double that enforced a
+     * weaker rule than the database would let a scoping bug pass here and
+     * fail in production, which is the wrong way round.
+     */
+    private val byProjectEmail = ConcurrentHashMap<Pair<UUID, String>, UUID>()
 
-    override fun findById(id: UUID): User? = byId[id]
+    override fun findByEmail(projectId: UUID, email: String): User? =
+        byProjectEmail[projectId to email]?.let { byId[it] }
 
-    override fun create(email: String, passwordHash: String): User {
+    override fun findById(projectId: UUID, id: UUID): User? =
+        byId[id]?.takeIf { it.projectId == projectId }
+
+    override fun create(projectId: UUID, email: String, passwordHash: String): User {
         val id = UUID.randomUUID()
-        val user = User(id = id, email = email, passwordHash = passwordHash, createdAt = clock.instant())
+        val user = User(
+            id = id,
+            projectId = projectId,
+            email = email,
+            passwordHash = passwordHash,
+            createdAt = clock.instant(),
+        )
         // Two-phase to keep the email index consistent with the row map.
-        if (byEmail.putIfAbsent(email, id) != null) {
+        if (byProjectEmail.putIfAbsent(projectId to email, id) != null) {
             throw IllegalStateException("email already exists: $email")
         }
         byId[id] = user

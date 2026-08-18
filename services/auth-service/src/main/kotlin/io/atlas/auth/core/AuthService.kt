@@ -29,15 +29,15 @@ class AuthService(
      * is already taken, [AuthError.InvalidEmail] or [AuthError.WeakPassword]
      * for malformed input.
      */
-    fun register(email: String, password: String): UUID {
+    fun register(projectId: UUID, email: String, password: String): UUID {
         val normalized = normalizeEmail(email)
         validateEmail(normalized)
         validatePassword(password)
-        if (users.findByEmail(normalized) != null) {
+        if (users.findByEmail(projectId, normalized) != null) {
             throw AuthError.EmailAlreadyExists(normalized)
         }
         val hash = hasher.hash(password)
-        return users.create(email = normalized, passwordHash = hash).id
+        return users.create(projectId = projectId, email = normalized, passwordHash = hash).id
     }
 
     /**
@@ -46,13 +46,18 @@ class AuthService(
      * API does not leak whether the email is registered.
      */
     fun authenticate(
+        projectId: UUID,
         email: String,
         password: String,
         lastLat: Double? = null,
         lastLng: Double? = null,
     ): SignedToken {
         val normalized = normalizeEmail(email)
-        val user = users.findByEmail(normalized) ?: throw AuthError.InvalidCredentials()
+        // Scoped lookup, so presenting another project's credentials fails
+        // as "no such user" rather than authenticating into the wrong
+        // tenant. It also keeps the timing story the same as before: one
+        // indexed lookup either way.
+        val user = users.findByEmail(projectId, normalized) ?: throw AuthError.InvalidCredentials()
         if (!hasher.verify(password, user.passwordHash)) {
             throw AuthError.InvalidCredentials()
         }
@@ -61,6 +66,11 @@ class AuthService(
         val session = sessions.create(userId = user.id, issuedAt = now, expiresAt = expiresAt)
         val claims = TokenClaims(
             userId = user.id,
+            // From the USER row, not from the caller's argument. They are
+            // equal here because the lookup was scoped, but taking it from
+            // the row means a token can only ever claim the project the
+            // user actually belongs to.
+            projectId = user.projectId,
             sessionId = session.id,
             issuedAt = now,
             expiresAt = expiresAt,
@@ -77,16 +87,18 @@ class AuthService(
      * token tied to a new session.
      */
     fun issueTokenForUser(
+        projectId: UUID,
         userId: UUID,
         lastLat: Double? = null,
         lastLng: Double? = null,
     ): SignedToken {
-        val user = users.findById(userId) ?: throw AuthError.InvalidCredentials()
+        val user = users.findById(projectId, userId) ?: throw AuthError.InvalidCredentials()
         val now = clock.instant()
         val expiresAt = now.plus(tokenLifetime)
         val session = sessions.create(userId = user.id, issuedAt = now, expiresAt = expiresAt)
         val claims = TokenClaims(
             userId = user.id,
+            projectId = user.projectId,
             sessionId = session.id,
             issuedAt = now,
             expiresAt = expiresAt,

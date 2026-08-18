@@ -14,6 +14,20 @@
 //! would extend the revocation window past the 30s the auth-service
 //! already accepts, and `RevokeToken` fans out over Kafka to auth-service
 //! instances only — the gateway would never hear about it.
+//!
+//! # The token must belong to the key's project
+//!
+//! A validated token proves who the user is. It does not, on its own,
+//! prove they belong to the customer whose key came with the request —
+//! and a token is not a secret the way a project key is: it is handed to
+//! end users, and one of those users may run a competing app.
+//!
+//! Without the check below, anyone who could obtain a token from project A
+//! could present it alongside their own project B key and act as A's user
+//! inside... whichever project the backends were told about. That is the
+//! whole tenancy boundary, defeated by a copied header. So the project
+//! signed into the token at issue time is compared against the project the
+//! key resolved to, and a mismatch is a 401.
 
 use axum::async_trait;
 use axum::extract::FromRequestParts;
@@ -24,12 +38,16 @@ use tonic::Request;
 use crate::error::ApiError;
 use crate::pb::auth::ValidateTokenRequest;
 use crate::state::AppState;
+use crate::tenant::Tenant;
 use crate::validate;
 
 /// A caller whose bearer token has been validated upstream this request.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: String,
+    /// The project the token was issued in. Equal to the request's tenant
+    /// by construction — a mismatch is rejected before this value exists.
+    pub project_id: String,
     pub session_id: String,
     /// Last known position stamped into the token at login. Present only
     /// if the client sent coordinates to `POST /v1/auth/login`; (0, 0) if
@@ -62,6 +80,12 @@ impl FromRequestParts<AppState> for AuthUser {
 
         let token = validate::bearer_token(header)?.to_string();
 
+        // The tenant layer runs over every /v1 route, so this is present
+        // for any handler that can take an AuthUser. Missing it means the
+        // layer was not wired, which is a 500 rather than an anonymous
+        // request — see `tenant::Tenant`'s extractor.
+        let tenant = Tenant::from_request_parts(parts, state).await?;
+
         let claims = state
             .auth
             .clone()
@@ -72,8 +96,23 @@ impl FromRequestParts<AppState> for AuthUser {
             .map_err(|s| ApiError::upstream("auth", s))?
             .into_inner();
 
+        if claims.project_id != tenant.project_id.to_string() {
+            // One message, and it does not say which half was wrong.
+            // Reporting "token belongs to another project" would confirm
+            // to whoever presented it that the token is otherwise valid.
+            metrics::counter!("atlas_gateway_tenant_mismatch_total").increment(1);
+            tracing::warn!(
+                key_prefix = %tenant.key_prefix,
+                key_project = %tenant.project_id,
+                token_project = %claims.project_id,
+                "token presented with a key from a different project"
+            );
+            return Err(ApiError::Unauthorized("invalid credentials".to_string()));
+        }
+
         Ok(AuthUser {
             user_id: claims.user_id,
+            project_id: claims.project_id,
             session_id: claims.session_id,
             last_lat: claims.last_lat,
             last_lng: claims.last_lng,

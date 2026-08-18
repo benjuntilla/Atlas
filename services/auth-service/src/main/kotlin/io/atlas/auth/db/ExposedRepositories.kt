@@ -6,6 +6,7 @@ import io.atlas.auth.core.User
 import io.atlas.auth.core.UserRepository
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
@@ -24,6 +25,7 @@ import java.util.UUID
 
 private fun ResultRow.toUser() = User(
     id = this[Users.id],
+    projectId = this[Users.projectId],
     email = this[Users.email],
     passwordHash = this[Users.passwordHash],
     createdAt = this[Users.createdAt],
@@ -38,17 +40,26 @@ private fun ResultRow.toSession() = Session(
 )
 
 class ExposedUserRepository : UserRepository {
-    override fun findByEmail(email: String): User? = transaction {
-        Users.selectAll().where { Users.email eq email }.singleOrNull()?.toUser()
+    override fun findByEmail(projectId: UUID, email: String): User? = transaction {
+        Users.selectAll()
+            .where { (Users.projectId eq projectId) and (Users.email eq email) }
+            .singleOrNull()?.toUser()
     }
 
-    override fun findById(id: UUID): User? = transaction {
-        Users.selectAll().where { Users.id eq id }.singleOrNull()?.toUser()
+    // Scoped even though `id` is a primary key and therefore already
+    // unique. The point is not uniqueness, it is that looking up a user id
+    // belonging to another tenant must return nothing rather than that
+    // tenant's user.
+    override fun findById(projectId: UUID, id: UUID): User? = transaction {
+        Users.selectAll()
+            .where { (Users.projectId eq projectId) and (Users.id eq id) }
+            .singleOrNull()?.toUser()
     }
 
-    override fun create(email: String, passwordHash: String): User = transaction {
+    override fun create(projectId: UUID, email: String, passwordHash: String): User = transaction {
         try {
             val id = Users.insert {
+                it[Users.projectId] = projectId
                 it[Users.email] = email
                 it[Users.passwordHash] = passwordHash
                 it[Users.createdAt] = Instant.now()

@@ -19,6 +19,7 @@ use crate::error::ApiError;
 use crate::extract::AuthUser;
 use crate::pb::auth::{AuthRequest, RegisterRequest, RevokeTokenRequest};
 use crate::state::AppState;
+use crate::tenant::Tenant;
 use crate::validate;
 
 pub fn routes() -> Router<AppState> {
@@ -42,6 +43,7 @@ pub struct RegisterOut {
 
 async fn register(
     State(state): State<AppState>,
+    tenant: Tenant,
     Json(body): Json<RegisterBody>,
 ) -> Result<(StatusCode, Json<RegisterOut>), ApiError> {
     // Email/password rules (format, length, strength) live in the
@@ -59,6 +61,9 @@ async fn register(
         .register(Request::new(RegisterRequest {
             email: body.email,
             password: body.password,
+            // From the resolved key, never the body — `RegisterBody` has
+            // no project field for a caller to set.
+            project_id: tenant.project_id.to_string(),
         }))
         .await
         .map_err(|s| ApiError::upstream("auth", s))?
@@ -89,6 +94,7 @@ pub struct TokenOut {
 
 async fn login(
     State(state): State<AppState>,
+    tenant: Tenant,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<TokenOut>, ApiError> {
     if body.email.trim().is_empty() || body.password.is_empty() {
@@ -122,6 +128,7 @@ async fn login(
             password: body.password,
             lat,
             lng,
+            project_id: tenant.project_id.to_string(),
         }))
         .await
         .map_err(|s| ApiError::upstream("auth", s))?

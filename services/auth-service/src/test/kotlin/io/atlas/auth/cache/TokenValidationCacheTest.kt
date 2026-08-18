@@ -11,6 +11,7 @@ import kotlin.test.assertNull
 class TokenValidationCacheTest {
 
     private fun newClaims(): TokenClaims = TokenClaims(
+        projectId = UUID.randomUUID(),
         userId = UUID.randomUUID(),
         sessionId = UUID.randomUUID(),
         issuedAt = Instant.now(),

@@ -20,6 +20,7 @@ import java.util.UUID
  *   "sub": "<user_id>",
  *   "iat": <unix>,
  *   "exp": <unix>,
+ *   "atlas:project_id": "<project_id>",
  *   "atlas:session_id": "<session_id>",
  *   "atlas:last_lat": <double>,        // optional
  *   "atlas:last_lng": <double>         // optional
@@ -56,6 +57,7 @@ class Jose4jJwtSigner(secret: String) : JwtSigner {
             subject = claims.userId.toString()
             issuedAt = org.jose4j.jwt.NumericDate.fromSeconds(claims.issuedAt.epochSecond)
             expirationTime = org.jose4j.jwt.NumericDate.fromSeconds(claims.expiresAt.epochSecond)
+            setClaim(CLAIM_PROJECT_ID, claims.projectId.toString())
             setClaim(CLAIM_SESSION_ID, claims.sessionId.toString())
             if (claims.lastLat != null) setClaim(CLAIM_LAST_LAT, claims.lastLat)
             if (claims.lastLng != null) setClaim(CLAIM_LAST_LNG, claims.lastLng)
@@ -94,6 +96,18 @@ class Jose4jJwtSigner(secret: String) : JwtSigner {
             throw AuthError.TokenInvalid("sub is not a UUID")
         }
 
+        // Required, not optional. A token without a project claim predates
+        // multi-tenancy and must not be honoured: accepting one would mean
+        // guessing which tenant its bearer belongs to, and the safe guess
+        // does not exist.
+        val projectIdStr = claims.getClaimValue(CLAIM_PROJECT_ID, String::class.java)
+            ?: throw AuthError.TokenInvalid("missing $CLAIM_PROJECT_ID claim")
+        val projectId = try {
+            UUID.fromString(projectIdStr)
+        } catch (e: IllegalArgumentException) {
+            throw AuthError.TokenInvalid("$CLAIM_PROJECT_ID is not a UUID")
+        }
+
         val sessionIdStr = claims.getClaimValue(CLAIM_SESSION_ID, String::class.java)
             ?: throw AuthError.TokenInvalid("missing $CLAIM_SESSION_ID claim")
         val sessionId = try {
@@ -104,6 +118,7 @@ class Jose4jJwtSigner(secret: String) : JwtSigner {
 
         return TokenClaims(
             userId = userId,
+            projectId = projectId,
             sessionId = sessionId,
             issuedAt = Instant.ofEpochSecond(claims.issuedAt.value),
             expiresAt = Instant.ofEpochSecond(claims.expirationTime.value),
@@ -113,6 +128,7 @@ class Jose4jJwtSigner(secret: String) : JwtSigner {
     }
 
     companion object {
+        const val CLAIM_PROJECT_ID = "atlas:project_id"
         const val CLAIM_SESSION_ID = "atlas:session_id"
         const val CLAIM_LAST_LAT = "atlas:last_lat"
         const val CLAIM_LAST_LNG = "atlas:last_lng"

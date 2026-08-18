@@ -50,8 +50,9 @@ class AuthGrpcService(
 ) : AuthServiceGrpcKt.AuthServiceCoroutineImplBase() {
 
     override suspend fun register(request: RegisterRequest): RegisterResponse {
+        val projectId = request.projectId.toProjectId()
         val userId = try {
-            authService.register(request.email, request.password)
+            authService.register(projectId, request.email, request.password)
         } catch (e: AuthError) {
             throw e.toGrpcStatusException()
         }
@@ -60,8 +61,10 @@ class AuthGrpcService(
     }
 
     override suspend fun authenticate(request: AuthRequest): TokenResponse {
+        val projectId = request.projectId.toProjectId()
         val signed = try {
             authService.authenticate(
+                projectId = projectId,
                 email = request.email,
                 password = request.password,
                 lastLat = if (request.lat == 0.0 && request.lng == 0.0) null else request.lat,
@@ -85,6 +88,7 @@ class AuthGrpcService(
         }
         val signed = try {
             authService.issueTokenForUser(
+                projectId = request.projectId.toProjectId(),
                 userId = userId,
                 lastLat = if (request.lat == 0.0 && request.lng == 0.0) null else request.lat,
                 lastLng = if (request.lat == 0.0 && request.lng == 0.0) null else request.lng,
@@ -181,9 +185,33 @@ private fun SignedToken.toResponse(): TokenResponse =
         .setExpiresAt(expiresAt.epochSecond)
         .build()
 
+/**
+ * Parse the project the gateway injected.
+ *
+ * This is a trusted-side check, and it is deliberately strict. Everything
+ * behind the gateway trusts its callers, so an empty or malformed
+ * project_id cannot have come from a client — it can only mean a bug on
+ * the trusted side. Defaulting to anything here would turn that bug into
+ * silent cross-tenant writes; failing the call turns it into a stack
+ * trace, which is what you want from a bug you have not found yet.
+ */
+private fun String.toProjectId(): UUID {
+    if (isEmpty()) {
+        throw Status.INVALID_ARGUMENT
+            .withDescription("project_id is required; the gateway must inject it")
+            .asException()
+    }
+    return try {
+        UUID.fromString(this)
+    } catch (e: IllegalArgumentException) {
+        throw Status.INVALID_ARGUMENT.withDescription("project_id is not a UUID").asException()
+    }
+}
+
 private fun DomainTokenClaims.toProto(): ProtoTokenClaims =
     ProtoTokenClaims.newBuilder()
         .setUserId(userId.toString())
+        .setProjectId(projectId.toString())
         .setSessionId(sessionId.toString())
         .setIssuedAt(issuedAt.epochSecond)
         .setExpiresAt(expiresAt.epochSecond)

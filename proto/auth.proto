@@ -17,9 +17,16 @@ service AuthService {
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeResponse);
 }
 
+// `project_id` on the messages below is injected by the gateway from the
+// caller's `X-Atlas-Key`, exactly as `user_id` is injected from the JWT.
+// The REST DTOs have no field for it, so a client cannot name a project —
+// it can only present a key that names one. A backend receiving an empty
+// project_id rejects the call rather than guessing, because the only way
+// to get here without one is a bug on the trusted side of the boundary.
 message RegisterRequest {
   string email = 1;
   string password = 2;
+  string project_id = 3;
 }
 
 message RegisterResponse {
@@ -32,12 +39,14 @@ message AuthRequest {
   // Optional location hint stamped into JWT claims on successful auth.
   double lat = 3;
   double lng = 4;
+  string project_id = 5;
 }
 
 message IssueTokenRequest {
   string user_id = 1;
   double lat = 2;
   double lng = 3;
+  string project_id = 4;
 }
 
 message TokenResponse {
@@ -56,6 +65,10 @@ message TokenClaims {
   int64 issued_at = 4;
   int64 expires_at = 5;
   string session_id = 6;
+  // The project the user belongs to, signed into the token at issue time.
+  // The gateway compares this against the project its key resolved to, so
+  // a token minted in one project cannot be replayed against another.
+  string project_id = 7;
 }
 
 message RevokeTokenRequest { string token = 1; }
