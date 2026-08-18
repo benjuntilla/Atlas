@@ -1,4 +1,8 @@
-//! `atlas.payments` — wallet reads and transaction initiation.
+//! `atlas.payments` — deposits, wallet reads, and transaction initiation.
+//!
+//! Deposits are the only way money enters the platform. The route is safe
+//! to expose because the wallet credited is the token's subject: a caller
+//! can only top up their own balance.
 //!
 //! # Why settle and refund are not routed here
 //!
@@ -35,7 +39,7 @@ use tonic::Request;
 
 use crate::error::ApiError;
 use crate::extract::AuthUser;
-use crate::pb::payments::{TransactionRequest, WalletRequest};
+use crate::pb::payments::{DepositRequest, TransactionRequest, WalletRequest};
 use crate::state::AppState;
 use crate::validate;
 
@@ -46,6 +50,7 @@ const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/wallet", get(wallet))
+        .route("/deposits", post(deposit))
         .route("/transactions", post(initiate))
 }
 
@@ -76,6 +81,65 @@ async fn wallet(
         balance_cents: resp.balance_cents,
         currency: resp.currency,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DepositBody {
+    /// Must be > 0.
+    pub amount_cents: i64,
+    /// Optional here for the same reason as on transactions: the
+    /// `Idempotency-Key` header is the conventional place. One is required.
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DepositOut {
+    pub transaction_id: String,
+    pub status: String,
+    /// Balance after the deposit, so the caller need not re-read the wallet.
+    pub balance_cents: i64,
+}
+
+/// Add funds to the caller's own wallet.
+///
+/// Unlike settle and refund, this one is safe to route: the wallet being
+/// credited is the token's subject, so there is no ownership question for
+/// the gateway to answer. A caller can only ever top up themselves.
+async fn deposit(
+    State(state): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<DepositBody>,
+) -> Result<(StatusCode, Json<DepositOut>), ApiError> {
+    let amount = validate::amount_cents(body.amount_cents)?;
+
+    let key_from_header = headers
+        .get(IDEMPOTENCY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let raw_key = key_from_header.or(body.idempotency_key).unwrap_or_default();
+    let idempotency_key = validate::idempotency_key(&raw_key)?.to_string();
+
+    let resp = state
+        .payments
+        .clone()
+        .deposit(Request::new(DepositRequest {
+            user_id: user.user_id,
+            amount_cents: amount,
+            idempotency_key,
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("payments", s))?
+        .into_inner();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(DepositOut {
+            transaction_id: resp.transaction_id,
+            status: resp.status,
+            balance_cents: resp.balance_cents,
+        }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

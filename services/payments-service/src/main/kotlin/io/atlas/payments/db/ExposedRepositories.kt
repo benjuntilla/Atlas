@@ -41,6 +41,7 @@ private fun ResultRow.toTxRecord() = TxRecord(
     rideId = this[Transactions.rideId],
     providerRef = this[Transactions.providerRef],
     idempotencyArgsHash = this[Transactions.idempotencyArgsHash],
+    kind = this[Transactions.kind],
 )
 
 class ExposedWalletRepository : WalletRepository {
@@ -98,6 +99,7 @@ class ExposedTransactionRepository : TransactionRepository {
         rideId: UUID?,
         providerRef: String?,
         argsHash: String?,
+        kind: String,
     ): TxRecord = transaction {
         try {
             val id = Transactions.insert {
@@ -109,6 +111,7 @@ class ExposedTransactionRepository : TransactionRepository {
                 it[Transactions.rideId] = rideId
                 it[Transactions.providerRef] = providerRef
                 it[idempotencyArgsHash] = argsHash
+                it[Transactions.kind] = kind
                 it[createdAt] = Instant.now()
             } get Transactions.id
             Transactions.selectAll().where { Transactions.id eq id }.single().toTxRecord()
@@ -133,6 +136,23 @@ class ExposedTransactionRepository : TransactionRepository {
                 it[status] = TxStatus.REFUNDED
             }
         }
+    }
+
+    override fun markFailed(id: UUID, reason: String) {
+        transaction {
+            Transactions.update({ Transactions.id eq id }) {
+                it[status] = TxStatus.FAILED
+            }
+        }
+        // The reason is logged rather than stored: payments.transactions has
+        // no column for it, and adding one to carry a provider string that
+        // is only ever read by a human is not worth a migration. The
+        // provider_ref on the row is what reconciliation actually needs.
+        LOG.warn("transaction {} marked failed: {}", id, reason)
+    }
+
+    private companion object {
+        private val LOG = org.slf4j.LoggerFactory.getLogger(ExposedTransactionRepository::class.java)
     }
 }
 

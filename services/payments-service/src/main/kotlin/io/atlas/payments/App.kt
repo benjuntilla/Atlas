@@ -1,7 +1,7 @@
 package io.atlas.payments
 
 import io.atlas.payments.config.EnvConfig
-import io.atlas.payments.core.FakePaymentProvider
+import io.atlas.payments.core.PaymentProviders
 import io.atlas.payments.core.PaymentsService
 import io.atlas.payments.db.DatabaseBootstrap
 import io.atlas.payments.db.ExposedOutboxBackend
@@ -53,7 +53,11 @@ fun main() {
     val transactions = ExposedTransactionRepository()
     val outboxStore = ExposedOutboxStore()
     val runner = ExposedTransactionRunner()
-    val provider = FakePaymentProvider()
+    // Selected by PAYMENT_PROVIDER. An unknown value throws here rather
+    // than silently falling back to the fake, which in production would
+    // approve every charge against money never collected.
+    val provider = PaymentProviders.fromName(config.paymentProvider)
+    LOG.info("payment provider: {}", provider.name)
 
     val payments = PaymentsService(
         wallets = wallets,
@@ -83,7 +87,7 @@ fun main() {
         .addService(health.service)
         .build()
 
-    val httpServer = startHttpServer(config.httpPort, registry)
+    val httpServer = startHttpServer(config.httpPort, registry, provider)
     server.start()
     health.setServing()
     health.setServing("atlas.payments.PaymentsService")

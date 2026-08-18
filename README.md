@@ -193,6 +193,7 @@ speaks gRPC on a private network.
 | GET | `/v1/geo/geofences` | Bearer | `geo.ListGeofences` |
 | DELETE | `/v1/geo/geofences/:id` | Bearer | `geo.DeleteGeofence` |
 | POST | `/v1/geo/geofences/check` | Bearer | `geo.TriggerGeofenceCheck` |
+| POST | `/v1/payments/deposits` | Bearer | `payments.Deposit` |
 | GET | `/v1/payments/wallet` | Bearer | `payments.GetWalletBalance` |
 | POST | `/v1/payments/transactions` | Bearer | `payments.InitiateTransaction` |
 | GET | `/healthz`, `/readyz` | — | — |
@@ -209,6 +210,29 @@ Every `user_id` sent to a backend comes from the validated token, so a
 caller can only ever read and write its own data. The backends trust that
 guarantee — geo-engine takes `user_id` from the request body without
 re-checking it — which is why the gateway must be the only route in.
+
+### Payments and the placeholder provider
+
+`atlas.payments` runs against `FakePaymentProvider`, which approves every
+charge and mints `fake_*` references. That placeholder covers the **provider
+network call only**. Everything around it is real and exercised:
+idempotency, the pending-then-capture ordering that keeps a crash
+recoverable, the transactional outbox, the ledger updates, and webhook
+signature verification.
+
+Deposits are the only way money enters the platform — before them wallets
+sat at zero and settlement refused to move funds that were not there, so no
+transaction could ever complete.
+
+Swapping in a real processor means implementing `PaymentProvider` and
+setting `PAYMENT_PROVIDER`. Nothing above the interface changes. An unknown
+value fails at startup rather than silently falling back to the fake, which
+in production would approve charges against money never collected.
+
+**Do not point this at real money until** a provider is implemented, the
+webhook handler reconciles against `payments.transactions`, and a sweep
+exists for deposits left pending by a crash between capture and credit
+(migration 0033 indexes exactly those rows).
 
 Four RPCs are deliberately unrouted: `auth.IssueToken` and
 `payments.DrainOutbox` (both marked internal in their `.proto`), plus

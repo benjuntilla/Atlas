@@ -6,6 +6,11 @@ option java_multiple_files = true;
 option java_package = "atlas.payments";
 
 service PaymentsService {
+  // Add funds to a wallet from an external payment method. This is the only
+  // way money enters the platform: wallets start at zero and settlement
+  // refuses to move funds a wallet does not hold.
+  rpc Deposit(DepositRequest) returns (DepositResponse);
+
   rpc InitiateTransaction(TransactionRequest) returns (TransactionResponse);
   rpc SettleTransaction(SettleRequest) returns (SettleResponse);
   rpc GetWalletBalance(WalletRequest) returns (WalletResponse);
@@ -15,6 +20,20 @@ service PaymentsService {
   // rows dispatched. The dispatcher also runs on a timer; this is for tests
   // and ops that want a deterministic flush. Not exposed through the gateway.
   rpc DrainOutbox(DrainOutboxRequest) returns (DrainOutboxResponse);
+}
+
+message DepositRequest {
+  string user_id         = 1;
+  int64  amount_cents    = 2;
+  string idempotency_key = 3;
+}
+
+message DepositResponse {
+  string transaction_id = 1;
+  string status         = 2;
+  // Wallet balance after the deposit, so the caller does not need a second
+  // round trip to render the result.
+  int64  balance_cents  = 3;
 }
 
 message TransactionRequest {

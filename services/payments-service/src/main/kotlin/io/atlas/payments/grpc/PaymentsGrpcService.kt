@@ -1,5 +1,7 @@
 package io.atlas.payments.grpc
 
+import atlas.payments.DepositRequest
+import atlas.payments.DepositResponse
 import atlas.payments.DrainOutboxRequest
 import atlas.payments.DrainOutboxResponse
 import atlas.payments.PaymentsServiceGrpcKt
@@ -28,6 +30,23 @@ class PaymentsGrpcService(
     private val payments: PaymentsService,
     private val dispatcher: OutboxDispatcher,
 ) : PaymentsServiceGrpcKt.PaymentsServiceCoroutineImplBase() {
+
+    override suspend fun deposit(request: DepositRequest): DepositResponse {
+        val result = try {
+            payments.deposit(
+                userId = request.userId,
+                amountCents = request.amountCents,
+                idempotencyKey = request.idempotencyKey,
+            )
+        } catch (e: PaymentError) {
+            throw e.toGrpcStatusException()
+        }
+        return DepositResponse.newBuilder()
+            .setTransactionId(result.transactionId.toString())
+            .setStatus(result.status)
+            .setBalanceCents(result.balanceCents)
+            .build()
+    }
 
     override suspend fun initiateTransaction(request: TransactionRequest): TransactionResponse {
         val result = try {

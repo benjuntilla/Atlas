@@ -11,12 +11,23 @@ interface PaymentsMetrics {
     fun transactionRefunded()
     fun outboxDispatched(count: Int)
 
+    /** A deposit that credited a wallet. This is money entering the platform. */
+    fun depositSettled()
+
+    /**
+     * A deposit the provider refused at capture. Worth alerting on: a rise
+     * here is either a provider incident or a card-testing attack.
+     */
+    fun depositFailed()
+
     companion object {
         val NOOP: PaymentsMetrics = object : PaymentsMetrics {
             override fun transactionInitiated() {}
             override fun transactionSettled() {}
             override fun transactionRefunded() {}
             override fun outboxDispatched(count: Int) {}
+            override fun depositSettled() {}
+            override fun depositFailed() {}
         }
     }
 }

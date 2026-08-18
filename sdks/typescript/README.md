@@ -35,6 +35,8 @@ const fence = await atlas.geo.createGeofence({
   radiusM: 250,
 });
 
+// Deposits are the only way money enters the platform.
+await atlas.payments.deposit({ amountCents: 10_000 });
 const { balanceCents } = await atlas.payments.wallet();
 ```
 
@@ -70,8 +72,9 @@ are not:
 | `POST` with an `Idempotency-Key` | yes |
 | `POST` without one | **no** |
 
-`payments.createTransaction` always sends an idempotency key, generating
-one if you do not supply it. That is what makes it retryable at all.
+`payments.createTransaction` and `payments.deposit` always send an
+idempotency key, generating one if you do not supply it. That is what makes
+them retryable at all.
 
 A generated key covers retries *within a single call*. It does not survive
 your process restarting, so if your application retries after a crash,

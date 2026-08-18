@@ -1,6 +1,8 @@
 import { Http } from './http.js';
 import type {
   Claims,
+  Deposit,
+  DepositParams,
   CreateGeofenceParams,
   CreateTransactionParams,
   Geofence,
@@ -335,6 +337,37 @@ class PaymentsApi {
     private readonly http: Http,
     private readonly holder: TokenHolder,
   ) {}
+
+  /**
+   * Add funds to the caller's own wallet from an external payment method.
+   *
+   * This is the only way money enters the platform — wallets start empty
+   * and a transfer cannot move funds that are not there. Like
+   * `createTransaction` it always sends an idempotency key, which is what
+   * makes it safe for the transport to retry.
+   *
+   * There is no `toUserId`: the wallet credited is the token's subject, so
+   * a caller can only ever top up themselves.
+   */
+  async deposit(params: DepositParams): Promise<Deposit> {
+    const idempotencyKey = params.idempotencyKey ?? randomKey();
+    const res = await this.http.request<{
+      transaction_id: string;
+      status: string;
+      balance_cents: number;
+    }>({
+      method: 'POST',
+      path: '/v1/payments/deposits',
+      token: this.holder.getToken(),
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: { amount_cents: params.amountCents },
+    });
+    return {
+      transactionId: res.transaction_id,
+      status: res.status,
+      balanceCents: res.balance_cents,
+    };
+  }
 
   /** The caller's own wallet. There is no way to read anyone else's. */
   async wallet(): Promise<Wallet> {

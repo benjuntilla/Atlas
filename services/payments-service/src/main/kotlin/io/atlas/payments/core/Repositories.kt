@@ -30,9 +30,21 @@ interface TransactionRepository {
         rideId: UUID?,
         providerRef: String?,
         argsHash: String?,
+        /** One of [TxKind]. Defaulted so transfer call sites need no change. */
+        kind: String = TxKind.TRANSFER,
     ): TxRecord
     fun markSettled(id: UUID, settledAt: Instant)
     fun markRefunded(id: UUID)
+
+    /**
+     * Mark a transaction failed.
+     *
+     * Needed by the deposit path: when the provider declines the capture
+     * of an already-recorded pending deposit, the row must not be left
+     * pending forever, where the reconciliation sweep would keep
+     * retrying a charge the provider has already refused.
+     */
+    fun markFailed(id: UUID, reason: String)
 }
 
 /**

@@ -106,6 +106,14 @@ async fn malformed_authorization_headers_are_rejected() {
 }
 
 /// Extractor ordering guarantee: `AuthUser` is declared before `Json` in
+/// Deposits credit a wallet, so an unauthenticated one would be a way to
+/// mint balance for an arbitrary user.
+#[tokio::test]
+async fn deposit_requires_authentication() {
+    let req = post_json("/v1/payments/deposits", r#"{"amount_cents":1000}"#);
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+}
+
 /// every protected handler, so an unauthenticated request with an invalid
 /// body is a 401. If someone reorders the arguments this flips to 400 and
 /// the body would be parsed for an anonymous caller.

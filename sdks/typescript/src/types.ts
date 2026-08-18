@@ -125,6 +125,24 @@ export interface Wallet {
   currency: string;
 }
 
+export interface DepositParams {
+  /** Must be > 0. */
+  amountCents: number;
+  /**
+   * Supply this to make retries safe across process restarts. Omitted, the
+   * SDK generates one per call — see `createTransaction` for the caveat.
+   */
+  idempotencyKey?: string;
+}
+
+export interface Deposit {
+  transactionId: string;
+  /** "settled" for a completed top-up. */
+  status: string;
+  /** Wallet balance after the deposit. */
+  balanceCents: number;
+}
+
 export interface CreateTransactionParams {
   toUserId: string;
   /** Must be > 0. */

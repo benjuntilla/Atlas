@@ -69,6 +69,7 @@ class InMemoryTransactionRepository : TransactionRepository {
         rideId: UUID?,
         providerRef: String?,
         argsHash: String?,
+        kind: String,
     ): TxRecord {
         if (keyToId.containsKey(idempotencyKey)) throw DuplicateIdempotencyKey(idempotencyKey)
         val record = TxRecord(
@@ -81,6 +82,7 @@ class InMemoryTransactionRepository : TransactionRepository {
             rideId = rideId,
             providerRef = providerRef,
             idempotencyArgsHash = argsHash,
+            kind = kind,
         )
         byId[record.id] = record
         keyToId[idempotencyKey] = record.id
@@ -95,6 +97,11 @@ class InMemoryTransactionRepository : TransactionRepository {
     @Synchronized
     override fun markRefunded(id: UUID) {
         byId[id] = byId.getValue(id).copy(status = TxStatus.REFUNDED)
+    }
+
+    @Synchronized
+    override fun markFailed(id: UUID, reason: String) {
+        byId[id] = byId.getValue(id).copy(status = TxStatus.FAILED)
     }
 }
 

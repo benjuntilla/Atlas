@@ -1,5 +1,6 @@
 package io.atlas.payments.http
 
+import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.PaymentsMetrics
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -29,7 +30,11 @@ private val LOG = LoggerFactory.getLogger("io.atlas.payments.http.HttpServer")
  *   GET  /healthz            liveness ping
  *   POST /webhooks/{provider} async provider callbacks (acknowledged, logged)
  */
-fun startHttpServer(port: Int, registry: PrometheusMeterRegistry): NettyApplicationEngine =
+fun startHttpServer(
+    port: Int,
+    registry: PrometheusMeterRegistry,
+    provider: PaymentProvider,
+): NettyApplicationEngine =
     embeddedServer(Netty, port = port) {
         routing {
             get("/metrics") {
@@ -39,13 +44,31 @@ fun startHttpServer(port: Int, registry: PrometheusMeterRegistry): NettyApplicat
                 call.respondText("ok")
             }
             post("/webhooks/{provider}") {
-                val provider = call.parameters["provider"] ?: "unknown"
+                val source = call.parameters["provider"] ?: "unknown"
                 val body = call.receiveText()
-                // Phase 4 uses the FakePaymentProvider, which never calls back.
-                // Real providers (Stripe et al.) would verify a signature and
-                // reconcile the referenced charge here. We acknowledge so the
-                // provider does not retry, and log for observability.
-                LOG.info("received webhook from provider={} bytes={}", provider, body.length)
+
+                // Verify BEFORE doing anything with the payload. This
+                // endpoint is an unauthenticated write path from the public
+                // internet into a payments system; the only thing making it
+                // safe is that the provider signed the request.
+                //
+                // The check runs even though FakePaymentProvider accepts
+                // everything, so the call site exists and cannot be
+                // forgotten when a real provider is wired in. Verification
+                // is provider-specific, which is why it lives on the
+                // PaymentProvider interface rather than here.
+                val signature = call.request.headers["Stripe-Signature"]
+                    ?: call.request.headers["X-Webhook-Signature"]
+                if (!provider.verifyWebhook(body, signature)) {
+                    LOG.warn("rejected webhook from provider={}: bad signature", source)
+                    call.respond(HttpStatusCode.Unauthorized)
+                    return@post
+                }
+
+                // Acknowledged and logged. Reconciling the referenced charge
+                // against payments.transactions is the next step and needs a
+                // real provider's event schema to be worth writing.
+                LOG.info("accepted webhook from provider={} bytes={}", source, body.length)
                 call.respond(HttpStatusCode.OK)
             }
         }
@@ -61,9 +84,13 @@ class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
     private val settled = registry.counter("atlas_payments_transactions_settled_total")
     private val refunded = registry.counter("atlas_payments_transactions_refunded_total")
     private val dispatched = registry.counter("atlas_payments_outbox_dispatched_total")
+    private val depositOk = registry.counter("atlas_payments_deposits_total", "outcome", "settled")
+    private val depositFail = registry.counter("atlas_payments_deposits_total", "outcome", "failed")
 
     override fun transactionInitiated() = initiated.increment()
     override fun transactionSettled() = settled.increment()
     override fun transactionRefunded() = refunded.increment()
     override fun outboxDispatched(count: Int) = dispatched.increment(count.toDouble())
+    override fun depositSettled() = depositOk.increment()
+    override fun depositFailed() = depositFail.increment()
 }

@@ -212,6 +212,22 @@ describe('payments', () => {
     });
   });
 
+  test('deposit sends an idempotency key and maps the balance back', async () => {
+    reset();
+    responses.push({
+      status: 201,
+      body: '{"transaction_id":"tx-9","status":"settled","balance_cents":10000}',
+    });
+    const out = await client({ token: 't' }).payments.deposit({ amountCents: 10_000 });
+
+    assert.equal(recorded[0]?.url, '/v1/payments/deposits');
+    assert.ok(typeof recorded[0]?.headers['idempotency-key'] === 'string');
+    // No toUserId: a caller can only ever top up themselves.
+    assert.deepEqual(JSON.parse(recorded[0]!.body), { amount_cents: 10_000 });
+    assert.equal(out.status, 'settled');
+    assert.equal(out.balanceCents, 10_000);
+  });
+
   test('a supplied idempotency key is used verbatim', async () => {
     reset();
     responses.push({ status: 201, body: '{"transaction_id":"t","status":"pending"}' });

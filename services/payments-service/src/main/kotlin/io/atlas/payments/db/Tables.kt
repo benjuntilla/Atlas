@@ -35,6 +35,7 @@ object Transactions : Table("payments.transactions") {
     val settledAt = timestamp("settled_at").nullable()
     val providerRef = text("provider_ref").nullable()
     val idempotencyArgsHash = text("idempotency_args_hash").nullable()
+    val kind = text("kind")
 
     override val primaryKey = PrimaryKey(id)
 }
