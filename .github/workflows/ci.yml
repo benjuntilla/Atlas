@@ -149,12 +149,17 @@ jobs:
       # The #[ignore]d sqlx tests hit the database directly at the same URL
       # docker-compose uses. geo-engine covers the PostGIS queries;
       # safety-consumer covers geofence transition detection against real
-      # geography maths, which is where a units bug would hide.
+      # geography maths, which is where a units bug would hide; migrator
+      # covers the tenant-isolation constraints, which only exist in SQL and
+      # so cannot be tested any other way.
       - name: Run DB-backed integration tests
+        env:
+          ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
         run: |
           cargo test -p atlas-geo-engine -- --include-ignored
           cargo test -p atlas-safety-consumer -- --include-ignored
           cargo test -p atlas-control-plane -- --include-ignored
+          cargo test -p atlas-migrator -- --include-ignored
 
       - uses: actions/setup-java@v4
         with:
