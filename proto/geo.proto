@@ -14,6 +14,12 @@ service GeoEngine {
   rpc CreateGeofence(CreateGeofenceRequest) returns (Geofence);
   rpc ListGeofences(ListGeofencesRequest) returns (ListGeofencesResponse);
   rpc DeleteGeofence(DeleteGeofenceRequest) returns (DeleteGeofenceResponse);
+
+  // Safety: a user's judgement about one place. These are what
+  // `NearbyUser.safety_score` and `ScoreRoute` are computed from — before
+  // this RPC existed there was no way to produce safety data at all, and
+  // both returned the neutral 1500.
+  rpc CastSafetyVote(SafetyVoteRequest) returns (SafetyVoteResponse);
 }
 
 // `project_id` on every request below is injected by the gateway from the
@@ -46,7 +52,15 @@ message NearbyUser {
   double lat = 2;
   double lng = 3;
   double distance_m = 4;
+  // Bayesian-smoothed net sentiment over safety votes near this position,
+  // in 1000..2000, neutral 1500. See geo.safety_score in migration 0060 —
+  // and note it is deliberately NOT ELO, which needs pairwise outcomes.
   double safety_score = 5;
+  // Distinct voters behind that score. 1500 from no votes and 1500 from a
+  // hundred evenly split ones are different facts, and a client that
+  // cannot tell them apart will present the first as if it were the
+  // second.
+  int64 safety_vote_count = 6;
 }
 
 message NearbyResponse { repeated NearbyUser users = 1; }
@@ -73,6 +87,9 @@ message RouteScoreResponse {
 message ScoredRoute {
   string route_id = 1;
   double score = 2;
+  // Distinct voters behind the score. With none, `score` is the neutral
+  // 1500 and comparing two routes on it is comparing two defaults.
+  int64 vote_count = 3;
 }
 
 message GeofenceCheckRequest {
@@ -134,4 +151,32 @@ message DeleteGeofenceRequest {
 
 message DeleteGeofenceResponse {
   bool deleted = 1;
+}
+
+// --- Safety votes -----------------------------------------------------------
+
+message SafetyVoteRequest {
+  string user_id = 1;
+  double lat = 2;
+  double lng = 3;
+  Verdict verdict = 4;
+  string project_id = 5;
+
+  // An enum rather than a free string: "safe" / "Safe" / "SAFE" arriving
+  // from three different SDKs and being counted as three verdicts is the
+  // sort of bug that only shows up in the aggregate.
+  enum Verdict {
+    VERDICT_UNKNOWN = 0;
+    SAFE = 1;
+    UNSAFE = 2;
+  }
+}
+
+message SafetyVoteResponse {
+  // The area's score after this vote, so a client can show the effect
+  // without a second round trip.
+  double safety_score = 1;
+  // How many distinct users have voted in the area, including this one.
+  // A score means very different things at 3 voters and at 300.
+  int64 vote_count = 2;
 }

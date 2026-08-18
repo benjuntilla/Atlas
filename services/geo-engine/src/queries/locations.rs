@@ -49,12 +49,19 @@ pub struct NearbyRow {
     pub lat: f64,
     pub distance_m: f64,
     pub safety_score: f64,
+    /// Distinct voters behind `safety_score`. Zero means the score is the
+    /// neutral default rather than a measurement, and a caller that cannot
+    /// tell those apart will present the first as if it were the second.
+    pub safety_vote_count: i64,
 }
 
 /// Find users near (lat, lng) within `radius_m` meters, excluding the
-/// requester. Joined to safety_ratings within 200m for an aggregate
-/// safety score; defaults to 1500.0 (the ELO neutral score) when no
-/// nearby ratings exist.
+/// requester, each with the safety score of the place they are standing.
+///
+/// The score comes from `geo.safety_votes` — each voter's most recent
+/// verdict within 200m, smoothed toward neutral by `geo.safety_score`.
+/// Somewhere nobody has voted scores exactly 1500, which is what this
+/// returned for everyone before votes existed.
 ///
 /// # Why the project filter is load-bearing here specifically
 ///
@@ -86,7 +93,7 @@ pub async fn nearby(
     requester_user_id: Uuid,
     limit: i64,
 ) -> Result<Vec<NearbyRow>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (Uuid, f64, f64, f64, f64)>(
+    let rows = sqlx::query_as::<_, (Uuid, f64, f64, f64, f64, i64)>(
         r#"
         SELECT
             l.user_id,
@@ -96,11 +103,32 @@ pub async fn nearby(
                 l.position::geography,
                 ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
             ) AS distance_m,
-            COALESCE(AVG(sr.elo_score), 1500.0) AS safety_score
+            s.score AS safety_score,
+            s.vote_count AS safety_vote_count
         FROM geo.locations l
-        LEFT JOIN geo.safety_ratings sr
-            ON sr.project_id = $6
-           AND ST_DWithin(sr.segment_geom::geography, l.position::geography, 200)
+        -- LATERAL so each row is scored at ITS OWN position rather than at
+        -- the query point: two users 400m apart are in different places,
+        -- and giving them one shared score would be a different (and
+        -- wrong) answer.
+        --
+        -- DISTINCT ON collapses each voter to their latest verdict before
+        -- counting, so re-voting corrects rather than accumulates.
+        LEFT JOIN LATERAL (
+            WITH latest AS (
+                SELECT DISTINCT ON (sv.user_id) sv.user_id, sv.vote
+                FROM geo.safety_votes sv
+                WHERE sv.project_id = $6
+                  AND ST_DWithin(sv.position::geography, l.position::geography, 200)
+                ORDER BY sv.user_id, sv.created_at DESC
+            )
+            SELECT
+                geo.safety_score(
+                    COUNT(*) FILTER (WHERE vote = 'safe'),
+                    COUNT(*) FILTER (WHERE vote = 'unsafe')
+                ) AS score,
+                COUNT(*)::bigint AS vote_count
+            FROM latest
+        ) s ON TRUE
         WHERE
             l.project_id = $6
             AND ST_DWithin(
@@ -110,7 +138,6 @@ pub async fn nearby(
             )
             AND l.expires_at > NOW()
             AND l.user_id != $4
-        GROUP BY l.user_id, l.position
         ORDER BY distance_m ASC
         LIMIT $5
         "#,
@@ -126,12 +153,15 @@ pub async fn nearby(
 
     Ok(rows
         .into_iter()
-        .map(|(user_id, lng, lat, distance_m, safety_score)| NearbyRow {
-            user_id,
-            lng,
-            lat,
-            distance_m,
-            safety_score,
-        })
+        .map(
+            |(user_id, lng, lat, distance_m, safety_score, safety_vote_count)| NearbyRow {
+                user_id,
+                lng,
+                lat,
+                distance_m,
+                safety_score,
+                safety_vote_count,
+            },
+        )
         .collect())
 }

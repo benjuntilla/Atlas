@@ -201,6 +201,59 @@ describe('geo', () => {
   });
 });
 
+describe('safety votes', () => {
+  test('casts a vote and maps the response', async () => {
+    reset();
+    responses.push({
+      status: 200,
+      body: '{"safety_score":1642.8,"vote_count":2}',
+    });
+    const out = await client({ token: 't' }).geo.castSafetyVote({
+      lat: 51.5074,
+      lng: -0.1278,
+      verdict: 'unsafe',
+    });
+
+    assert.equal(out.safetyScore, 1642.8);
+    assert.equal(out.voteCount, 2);
+    assert.equal(recorded[0]?.url, '/v1/geo/safety/votes');
+    assert.deepEqual(JSON.parse(recorded[0]!.body), {
+      lat: 51.5074,
+      lng: -0.1278,
+      verdict: 'unsafe',
+    });
+    // No user id in the body: the vote is attributed to the token.
+    assert.ok(!('user_id' in JSON.parse(recorded[0]!.body)));
+  });
+
+  test('nearby surfaces the vote count alongside the score', async () => {
+    reset();
+    responses.push({
+      status: 200,
+      body: JSON.stringify({
+        users: [
+          {
+            user_id: 'u-1',
+            lat: 1,
+            lng: 2,
+            distance_m: 3,
+            safety_score: 1500,
+            safety_vote_count: 0,
+          },
+        ],
+      }),
+    });
+    const { users } = await client({ token: 't' }).geo.nearby({
+      lat: 1,
+      lng: 2,
+      radiusM: 100,
+    });
+    // 1500 with no voters is "no data", not "measured as neutral".
+    assert.equal(users[0]?.safetyScore, 1500);
+    assert.equal(users[0]?.safetyVoteCount, 0);
+  });
+});
+
 describe('payments', () => {
   test('createTransaction always sends an Idempotency-Key', async () => {
     reset();

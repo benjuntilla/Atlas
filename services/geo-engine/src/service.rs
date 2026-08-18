@@ -26,10 +26,11 @@ use uuid::Uuid;
 use crate::kafka::LocationProducer;
 use crate::pb::events::LocationUpdateEvent;
 use crate::pb::geo::{
-    geo_engine_server::GeoEngine, CreateGeofenceRequest, DeleteGeofenceRequest,
-    DeleteGeofenceResponse, Geofence, GeofenceCheckRequest, GeofenceCheckResponse,
-    ListGeofencesRequest, ListGeofencesResponse, LocationAck, LocationUpdate, NearbyRequest,
-    NearbyResponse, NearbyUser, RouteScoreRequest, RouteScoreResponse, ScoredRoute,
+    geo_engine_server::GeoEngine, safety_vote_request::Verdict, CreateGeofenceRequest,
+    DeleteGeofenceRequest, DeleteGeofenceResponse, Geofence, GeofenceCheckRequest,
+    GeofenceCheckResponse, ListGeofencesRequest, ListGeofencesResponse, LocationAck,
+    LocationUpdate, NearbyRequest, NearbyResponse, NearbyUser, RouteScoreRequest,
+    RouteScoreResponse, SafetyVoteRequest, SafetyVoteResponse, ScoredRoute,
 };
 use crate::queries;
 
@@ -173,6 +174,7 @@ impl GeoEngine for GeoEngineImpl {
                 lng: row.lng,
                 distance_m: row.distance_m,
                 safety_score: row.safety_score,
+                safety_vote_count: row.safety_vote_count,
             })
             .collect();
 
@@ -214,7 +216,7 @@ impl GeoEngine for GeoEngineImpl {
         let mut scored = Vec::with_capacity(r.candidates.len());
         for c in r.candidates {
             let points: Vec<(f64, f64)> = c.points.iter().map(|p| (p.lat, p.lng)).collect();
-            let score = queries::routes::score_route(&self.pool, project_id, &points)
+            let result = queries::safety::score_route_line(&self.pool, project_id, &points)
                 .await
                 .map_err(|e| {
                     warn!(error = %e, "score_route query failed");
@@ -222,7 +224,8 @@ impl GeoEngine for GeoEngineImpl {
                 })?;
             scored.push(ScoredRoute {
                 route_id: c.route_id,
-                score,
+                score: result.score,
+                vote_count: result.vote_count,
             });
         }
         metrics::histogram!(
@@ -231,7 +234,9 @@ impl GeoEngine for GeoEngineImpl {
         )
         .record(start.elapsed().as_secs_f64() * 1000.0);
 
-        // Best = highest ELO. Stable: first candidate wins on ties.
+        // Best = highest safety score. Stable: first candidate wins on
+        // ties, which is what makes the answer reproducible when no route
+        // has any votes and every score is the neutral 1500.
         let best = scored
             .iter()
             .max_by(|a, b| {
@@ -343,6 +348,57 @@ impl GeoEngine for GeoEngineImpl {
                 Status::internal("delete_geofence failed")
             })?;
         Ok(Response::new(DeleteGeofenceResponse { deleted }))
+    }
+
+    async fn cast_safety_vote(
+        &self,
+        req: Request<SafetyVoteRequest>,
+    ) -> Result<Response<SafetyVoteResponse>, Status> {
+        let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
+        let user_id = parse_user_id(&r.user_id)?;
+
+        // VERDICT_UNKNOWN is proto3's zero value, so it is what an unset
+        // field arrives as. Counting it as either verdict would let a
+        // client that forgot the field silently move scores.
+        let verdict = match Verdict::try_from(r.verdict) {
+            Ok(Verdict::Safe) => queries::safety::Verdict::Safe,
+            Ok(Verdict::Unsafe) => queries::safety::Verdict::Unsafe,
+            _ => return Err(Status::invalid_argument("verdict must be SAFE or UNSAFE")),
+        };
+
+        if !r.lat.is_finite() || !r.lng.is_finite() {
+            return Err(Status::invalid_argument("lat and lng must be finite"));
+        }
+
+        let score =
+            queries::safety::cast_vote(&self.pool, project_id, user_id, r.lat, r.lng, verdict)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "cast_safety_vote failed");
+                    // An unknown user_id is a foreign-key violation, which
+                    // is the caller's mistake rather than ours.
+                    if let sqlx::Error::Database(dbe) = &e {
+                        if dbe.constraint().is_some() {
+                            return Status::failed_precondition("user_id does not exist");
+                        }
+                    }
+                    Status::internal("cast_safety_vote failed")
+                })?;
+
+        metrics::counter!(
+            "atlas_geo_safety_votes_total",
+            "verdict" => match verdict {
+                queries::safety::Verdict::Safe => "safe",
+                queries::safety::Verdict::Unsafe => "unsafe",
+            },
+        )
+        .increment(1);
+
+        Ok(Response::new(SafetyVoteResponse {
+            safety_score: score.score,
+            vote_count: score.vote_count,
+        }))
     }
 }
 

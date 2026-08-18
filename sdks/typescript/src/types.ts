@@ -67,8 +67,34 @@ export interface NearbyUser {
   lat: number;
   lng: number;
   distanceM: number;
-  /** ELO-style safety score; 1500 is neutral. */
+  /**
+   * Safety score for the place this user is standing, in 1000..2000 with
+   * 1500 neutral. Derived from safety votes near that position, smoothed
+   * toward neutral in proportion to how little evidence there is.
+   *
+   * Read it together with `safetyVoteCount`: 1500 from nobody voting and
+   * 1500 from a hundred evenly split voters are different facts, and a UI
+   * that shows them the same way is claiming knowledge it does not have.
+   */
   safetyScore: number;
+  /** Distinct voters behind `safetyScore`. Zero means "no data". */
+  safetyVoteCount: number;
+}
+
+/** One user's judgement about one place. */
+export type SafetyVerdict = 'safe' | 'unsafe';
+
+export interface SafetyVoteParams {
+  lat: number;
+  lng: number;
+  verdict: SafetyVerdict;
+}
+
+export interface SafetyVoteResult {
+  /** The area's score after your vote. */
+  safetyScore: number;
+  /** Distinct voters behind it, you included. */
+  voteCount: number;
 }
 
 export interface LatLng {

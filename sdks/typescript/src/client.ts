@@ -15,6 +15,8 @@ import type {
   RegisterResult,
   RouteCandidate,
   RouteScore,
+  SafetyVoteParams,
+  SafetyVoteResult,
   Session,
   Transaction,
   Wallet,
@@ -235,6 +237,7 @@ class GeoApi {
         lng: number;
         distance_m: number;
         safety_score: number;
+        safety_vote_count: number;
       }>;
     }>({
       method: 'GET',
@@ -255,11 +258,33 @@ class GeoApi {
         lng: u.lng,
         distanceM: u.distance_m,
         safetyScore: u.safety_score,
+        safetyVoteCount: u.safety_vote_count,
       })),
     };
   }
 
-  /** Score route candidates against the safety graph. Highest score wins. */
+  /**
+   * Record the caller's judgement about a place.
+   *
+   * The vote is attributed to the logged-in user, so this needs a token.
+   * Voting again in the same area replaces your previous verdict rather
+   * than adding to it — opinions change, and one user is one voter however
+   * often they vote.
+   */
+  async castSafetyVote(params: SafetyVoteParams): Promise<SafetyVoteResult> {
+    const res = await this.http.request<{
+      safety_score: number;
+      vote_count: number;
+    }>({
+      method: 'POST',
+      path: '/v1/geo/safety/votes',
+      token: this.holder.getToken(),
+      body: { lat: params.lat, lng: params.lng, verdict: params.verdict },
+    });
+    return { safetyScore: res.safety_score, voteCount: res.vote_count };
+  }
+
+  /** Score route candidates against nearby safety votes. Highest wins. */
   async scoreRoute(candidates: RouteCandidate[]): Promise<RouteScore> {
     const res = await this.http.request<{
       best_route_id: string;

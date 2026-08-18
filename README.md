@@ -199,6 +199,7 @@ speaks gRPC on a private network.
 | POST | `/v1/geo/geofences` | required | Bearer | `geo.CreateGeofence` |
 | GET | `/v1/geo/geofences` | required | Bearer | `geo.ListGeofences` |
 | DELETE | `/v1/geo/geofences/:id` | required | Bearer | `geo.DeleteGeofence` |
+| POST | `/v1/geo/safety/votes` | required | Bearer | `geo.CastSafetyVote` |
 | POST | `/v1/geo/geofences/check` | required | Bearer | `geo.TriggerGeofenceCheck` |
 | POST | `/v1/payments/deposits` | required | Bearer | `payments.Deposit` |
 | GET | `/v1/payments/wallet` | required | Bearer | `payments.GetWalletBalance` |
@@ -334,11 +335,39 @@ fare-consumer reads. Those are acknowledgements, not instructions; acting
 on them would settle in response to having settled, forever. They are
 recorded in the audit log and nothing else.
 
-`atlas.elo.recompute` and the `geo.safety_votes` table are still
-unconnected: there is no API for a user to cast a safety vote, so nothing
-produces the event and the ELO scores in `safety_ratings` never change.
-`GetNearby` therefore returns the neutral 1500.0 for every user. That is a
-known gap, not an oversight in this phase.
+## Safety scores
+
+`POST /v1/geo/safety/votes` records one user's judgement about one place —
+`safe` or `unsafe`, attributed to the token's user rather than a body
+field. `GET /v1/geo/nearby` and route scoring are both computed from those
+votes.
+
+A score is the Bayesian-smoothed balance of votes near a point, bounded to
+1000..2000 with 1500 meaning neutral — which is also what a place nobody
+has voted on scores. One voter cannot swing a location to an extreme; two
+hundred agreeing ones get most of the way. Aggregation takes each voter's
+MOST RECENT verdict within 200m, so voting twice corrects rather than
+stuffs the ballot, and one user is one voter however often they vote.
+
+Every score comes with a `vote_count`, and reading them together matters:
+1500 from nobody voting and 1500 from a hundred evenly split voters are
+different facts, and a UI that renders them identically is claiming
+knowledge it does not have.
+
+**It is deliberately not ELO**, despite what the schema used to call it.
+ELO rates competitors from pairwise outcomes — A played B, A won. Safety
+votes are absolute judgements about one place with no opponent and no
+match, so ELO over them produces numbers that move without meaning
+anything. The old `geo.safety_ratings` table scored line segments that
+nothing ever produced, alongside votes nothing ever cast; migration 0060
+drops it and makes votes the single source.
+
+Votes are per project. One customer's users voting a street unsafe does
+not change what another customer's users are told about it.
+
+`atlas.elo.recompute` remains unwired — scores are computed at read time
+rather than materialised — and stays in `events.proto` as the topic a
+future caching pass would use.
 
 ## Rate limiting
 

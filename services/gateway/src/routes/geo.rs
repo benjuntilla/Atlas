@@ -14,8 +14,9 @@ use tonic::Request;
 use crate::error::ApiError;
 use crate::extract::AuthUser;
 use crate::pb::geo::{
-    CreateGeofenceRequest, DeleteGeofenceRequest, GeofenceCheckRequest, LatLng,
-    ListGeofencesRequest, LocationUpdate, NearbyRequest, RouteCandidate, RouteScoreRequest,
+    safety_vote_request::Verdict, CreateGeofenceRequest, DeleteGeofenceRequest,
+    GeofenceCheckRequest, LatLng, ListGeofencesRequest, LocationUpdate, NearbyRequest,
+    RouteCandidate, RouteScoreRequest, SafetyVoteRequest,
 };
 use crate::state::AppState;
 use crate::validate;
@@ -28,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         .route("/geofences", post(create_geofence).get(list_geofences))
         .route("/geofences/:id", delete(delete_geofence))
         .route("/geofences/check", post(check_geofences))
+        .route("/safety/votes", post(cast_safety_vote))
 }
 
 // --- locations --------------------------------------------------------------
@@ -437,5 +439,67 @@ async fn check_geofences(
     Ok(Json(CheckOut {
         triggered: resp.triggered,
         geofence_ids: resp.geofence_ids,
+    }))
+}
+
+// --- safety votes -----------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SafetyVoteBody {
+    pub lat: f64,
+    pub lng: f64,
+    /// `"safe"` or `"unsafe"`. Anything else is a 400 rather than a
+    /// silently discarded vote — a typo that scored nothing would be
+    /// invisible to the caller and would quietly bias the aggregate.
+    pub verdict: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SafetyVoteOut {
+    /// The area's score after this vote, in 1000..2000, neutral 1500.
+    pub safety_score: f64,
+    /// Distinct voters behind it, this caller included.
+    pub vote_count: i64,
+}
+
+/// Record the caller's judgement about the place at (lat, lng).
+///
+/// The vote is attributed to the token's user, never to a body field, so
+/// nobody can vote as somebody else — and because aggregation takes each
+/// voter's most recent verdict, voting twice corrects rather than stuffs.
+async fn cast_safety_vote(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<SafetyVoteBody>,
+) -> Result<Json<SafetyVoteOut>, ApiError> {
+    validate::lat_lng(body.lat, body.lng)?;
+
+    let verdict = match body.verdict.trim().to_ascii_lowercase().as_str() {
+        "safe" => Verdict::Safe,
+        "unsafe" => Verdict::Unsafe,
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "verdict must be \"safe\" or \"unsafe\", got {other:?}"
+            )))
+        }
+    };
+
+    let resp = state
+        .geo
+        .clone()
+        .cast_safety_vote(Request::new(SafetyVoteRequest {
+            project_id: user.project_id,
+            user_id: user.user_id,
+            lat: body.lat,
+            lng: body.lng,
+            verdict: verdict as i32,
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("geo", s))?
+        .into_inner();
+
+    Ok(Json(SafetyVoteOut {
+        safety_score: resp.safety_score,
+        vote_count: resp.vote_count,
     }))
 }

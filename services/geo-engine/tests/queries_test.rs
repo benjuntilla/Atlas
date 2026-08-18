@@ -217,15 +217,19 @@ async fn nearby_radius_is_meters_not_degrees() {
 
 #[tokio::test]
 #[ignore]
-async fn score_route_defaults_to_neutral_elo_when_no_ratings() {
+async fn score_route_is_neutral_where_nobody_has_voted() {
     let pool = pool().await;
     let project = seed_project(&pool).await;
-    // A short route in the middle of the ocean — no safety ratings nearby.
+    // A short route in the middle of the ocean — nobody has voted here.
     let route = vec![(0.0, 0.0), (0.001, 0.001)];
-    let score = atlas_geo_engine::queries::routes::score_route(&pool, project, &route)
+    let scored = atlas_geo_engine::queries::safety::score_route_line(&pool, project, &route)
         .await
         .unwrap();
-    assert_eq!(score, 1500.0);
+    assert_eq!(scored.score, 1500.0);
+    assert_eq!(
+        scored.vote_count, 0,
+        "the neutral score must come with the evidence that there is none"
+    );
 }
 
 // --- geofences --------------------------------------------------------------
@@ -454,4 +458,262 @@ fn unique_coords(seed: Uuid) -> (f64, f64) {
     let lat = -60.0 + (bytes[0] as f64) * (120.0 / 255.0);
     let lng = -170.0 + (bytes[1] as f64) * (340.0 / 255.0);
     (lat, lng)
+}
+
+// --- safety votes -----------------------------------------------------------
+
+/// The whole point of the feature: before this, `safety_score` was
+/// `COALESCE(AVG(elo_score), 1500.0)` over a table nothing ever wrote to,
+/// so it was 1500.0 for every user on the platform. A vote has to move it.
+#[tokio::test]
+#[ignore]
+async fn votes_move_the_score_away_from_neutral() {
+    let pool = pool().await;
+    let project = seed_project(&pool).await;
+    let voter = seed_user(&pool, project).await;
+    let (lat, lng) = unique_coords(voter);
+
+    let before = atlas_geo_engine::queries::safety::score_at(&pool, project, lat, lng)
+        .await
+        .expect("score before");
+    assert_eq!(before.score, 1500.0, "somewhere unvoted starts neutral");
+    assert_eq!(before.vote_count, 0);
+
+    let after = atlas_geo_engine::queries::safety::cast_vote(
+        &pool,
+        project,
+        voter,
+        lat,
+        lng,
+        atlas_geo_engine::queries::safety::Verdict::Unsafe,
+    )
+    .await
+    .expect("cast vote");
+
+    assert!(
+        after.score < 1500.0,
+        "an unsafe vote must lower the score, got {}",
+        after.score
+    );
+    assert_eq!(after.vote_count, 1);
+}
+
+/// Smoothing is the property that makes a score readable: one voter must
+/// not be able to drive a place to an extreme, and many agreeing voters
+/// must get further than one.
+#[tokio::test]
+#[ignore]
+async fn more_agreeing_votes_move_the_score_further() {
+    let pool = pool().await;
+    let project = seed_project(&pool).await;
+    let anchor = seed_user(&pool, project).await;
+    let (lat, lng) = unique_coords(anchor);
+
+    let mut scores = Vec::new();
+    for _ in 0..5 {
+        let voter = seed_user(&pool, project).await;
+        let s = atlas_geo_engine::queries::safety::cast_vote(
+            &pool,
+            project,
+            voter,
+            lat,
+            lng,
+            atlas_geo_engine::queries::safety::Verdict::Safe,
+        )
+        .await
+        .expect("cast vote");
+        scores.push(s.score);
+    }
+
+    assert!(
+        scores.windows(2).all(|w| w[1] > w[0]),
+        "each additional agreeing vote must move the score further: {scores:?}"
+    );
+    assert!(
+        scores[0] < 1700.0,
+        "one voter must not swing a place to an extreme, got {}",
+        scores[0]
+    );
+    assert!(
+        *scores.last().unwrap() < 2000.0,
+        "the score is bounded below 2000 no matter the agreement"
+    );
+}
+
+/// Re-voting corrects rather than accumulates. Without the DISTINCT ON,
+/// one determined user could vote a hundred times and outweigh everybody.
+#[tokio::test]
+#[ignore]
+async fn a_user_voting_twice_counts_once_and_the_latest_wins() {
+    let pool = pool().await;
+    let project = seed_project(&pool).await;
+    let voter = seed_user(&pool, project).await;
+    let (lat, lng) = unique_coords(voter);
+
+    let first = atlas_geo_engine::queries::safety::cast_vote(
+        &pool,
+        project,
+        voter,
+        lat,
+        lng,
+        atlas_geo_engine::queries::safety::Verdict::Safe,
+    )
+    .await
+    .expect("first vote");
+    assert!(first.score > 1500.0);
+    assert_eq!(first.vote_count, 1);
+
+    // Same user, opposite verdict.
+    let second = atlas_geo_engine::queries::safety::cast_vote(
+        &pool,
+        project,
+        voter,
+        lat,
+        lng,
+        atlas_geo_engine::queries::safety::Verdict::Unsafe,
+    )
+    .await
+    .expect("second vote");
+
+    assert_eq!(
+        second.vote_count, 1,
+        "one user is one voter however often they vote"
+    );
+    assert!(
+        second.score < 1500.0,
+        "the latest verdict must win, got {}",
+        second.score
+    );
+}
+
+/// Safety data is per tenant. One customer's users voting a street unsafe
+/// must not change what another customer's users are told about it.
+#[tokio::test]
+#[ignore]
+async fn votes_do_not_cross_projects() {
+    let pool = pool().await;
+    let project_a = seed_project(&pool).await;
+    let project_b = seed_project(&pool).await;
+    let voter = seed_user(&pool, project_a).await;
+    let (lat, lng) = unique_coords(voter);
+
+    for _ in 0..5 {
+        let v = seed_user(&pool, project_a).await;
+        atlas_geo_engine::queries::safety::cast_vote(
+            &pool,
+            project_a,
+            v,
+            lat,
+            lng,
+            atlas_geo_engine::queries::safety::Verdict::Unsafe,
+        )
+        .await
+        .expect("vote in A");
+    }
+
+    let a = atlas_geo_engine::queries::safety::score_at(&pool, project_a, lat, lng)
+        .await
+        .expect("score in A");
+    let b = atlas_geo_engine::queries::safety::score_at(&pool, project_b, lat, lng)
+        .await
+        .expect("score in B");
+
+    assert!(a.score < 1500.0, "project A sees its own votes");
+    assert_eq!(
+        b.score, 1500.0,
+        "project B must see neutral at the same coordinates"
+    );
+    assert_eq!(b.vote_count, 0);
+}
+
+/// Votes are positional: a verdict about one street says nothing about a
+/// street a hundred kilometres away.
+#[tokio::test]
+#[ignore]
+async fn a_vote_does_not_affect_a_distant_place() {
+    let pool = pool().await;
+    let project = seed_project(&pool).await;
+    let voter = seed_user(&pool, project).await;
+    let (lat, lng) = unique_coords(voter);
+
+    atlas_geo_engine::queries::safety::cast_vote(
+        &pool,
+        project,
+        voter,
+        lat,
+        lng,
+        atlas_geo_engine::queries::safety::Verdict::Unsafe,
+    )
+    .await
+    .expect("vote");
+
+    // ~1.1 km north — well outside the 200m scoring radius.
+    let far = atlas_geo_engine::queries::safety::score_at(&pool, project, lat + 0.01, lng)
+        .await
+        .expect("score far away");
+    assert_eq!(far.score, 1500.0);
+    assert_eq!(far.vote_count, 0);
+}
+
+/// `nearby` is where the score is actually consumed, so the wiring gets
+/// its own test rather than being assumed from the unit-level ones.
+#[tokio::test]
+#[ignore]
+async fn nearby_reports_the_score_of_each_users_own_position() {
+    let pool = pool().await;
+    let project = seed_project(&pool).await;
+    let asker = seed_user(&pool, project).await;
+    let subject = seed_user(&pool, project).await;
+    let (lat, lng) = unique_coords(subject);
+
+    atlas_geo_engine::queries::locations::insert_location(
+        &pool,
+        project,
+        subject,
+        lat,
+        lng,
+        Utc::now(),
+    )
+    .await
+    .expect("insert location");
+
+    let before =
+        atlas_geo_engine::queries::locations::nearby(&pool, project, lat, lng, 500.0, asker, 50)
+            .await
+            .expect("nearby before");
+    let row = before
+        .iter()
+        .find(|r| r.user_id == subject)
+        .expect("subject is nearby");
+    assert_eq!(row.safety_score, 1500.0);
+    assert_eq!(row.safety_vote_count, 0);
+
+    for _ in 0..4 {
+        let v = seed_user(&pool, project).await;
+        atlas_geo_engine::queries::safety::cast_vote(
+            &pool,
+            project,
+            v,
+            lat,
+            lng,
+            atlas_geo_engine::queries::safety::Verdict::Safe,
+        )
+        .await
+        .expect("vote");
+    }
+
+    let after =
+        atlas_geo_engine::queries::locations::nearby(&pool, project, lat, lng, 500.0, asker, 50)
+            .await
+            .expect("nearby after");
+    let row = after
+        .iter()
+        .find(|r| r.user_id == subject)
+        .expect("subject is still nearby");
+    assert!(
+        row.safety_score > 1500.0,
+        "nearby must reflect the votes, got {}",
+        row.safety_score
+    );
+    assert_eq!(row.safety_vote_count, 4);
 }
