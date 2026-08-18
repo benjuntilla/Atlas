@@ -9,6 +9,9 @@ The platform exposes four namespaces that mirror four backend services:
 * `atlas.payments` for wallets, idempotent transactions, and settlement
 * `atlas.events` for a protobuf-encoded Kafka event bus
 
+Atlas is multi-tenant: many applications share one deployment and none of
+them can see another's users, locations, or money.
+
 A developer configures everything by dropping an `atlas.toml` in their project root, runs `atlas deploy`, and starts calling the SDK in their language of choice.
 
 ## Why this project exists
@@ -36,6 +39,10 @@ In active development. The repository currently contains:
 * **Container images** for all nine workloads, built and pushed to GHCR on every push
 * **Terraform** for GCP: VPC, GKE with Dataplane V2, private Cloud SQL with PostGIS, Secret Manager, Workload Identity
 * A **TypeScript SDK** (`sdks/typescript`) with zero runtime dependencies, covering the whole gateway surface
+
+* **Multi-tenancy** across the whole data plane: project-scoped users,
+  locations, geofences, wallets and transactions, with the boundary
+  enforced in SQL where it can be
 
 Still to come: the Dart and Rust SDKs.
 
@@ -180,36 +187,85 @@ anything.
 The gateway is the only service exposed publicly. Everything behind it
 speaks gRPC on a private network.
 
-| Method | Path | Auth | Backend RPC |
-|---|---|---|---|
-| POST | `/v1/auth/register` | — | `auth.Register` |
-| POST | `/v1/auth/login` | — | `auth.Authenticate` |
-| POST | `/v1/auth/logout` | Bearer | `auth.RevokeToken` |
-| GET | `/v1/auth/me` | Bearer | `auth.ValidateToken` |
-| POST | `/v1/geo/locations` | Bearer | `geo.UpdateLocation` |
-| GET | `/v1/geo/nearby` | Bearer | `geo.GetNearby` |
-| POST | `/v1/geo/routes/score` | Bearer | `geo.ScoreRoute` |
-| POST | `/v1/geo/geofences` | Bearer | `geo.CreateGeofence` |
-| GET | `/v1/geo/geofences` | Bearer | `geo.ListGeofences` |
-| DELETE | `/v1/geo/geofences/:id` | Bearer | `geo.DeleteGeofence` |
-| POST | `/v1/geo/geofences/check` | Bearer | `geo.TriggerGeofenceCheck` |
-| POST | `/v1/payments/deposits` | Bearer | `payments.Deposit` |
-| GET | `/v1/payments/wallet` | Bearer | `payments.GetWalletBalance` |
-| POST | `/v1/payments/transactions` | Bearer | `payments.InitiateTransaction` |
-| GET | `/healthz`, `/readyz` | — | — |
+| Method | Path | Key | Token | Backend RPC |
+|---|---|---|---|---|
+| POST | `/v1/auth/register` | required | — | `auth.Register` |
+| POST | `/v1/auth/login` | required | — | `auth.Authenticate` |
+| POST | `/v1/auth/logout` | required | Bearer | `auth.RevokeToken` |
+| GET | `/v1/auth/me` | required | Bearer | `auth.ValidateToken` |
+| POST | `/v1/geo/locations` | required | Bearer | `geo.UpdateLocation` |
+| GET | `/v1/geo/nearby` | required | Bearer | `geo.GetNearby` |
+| POST | `/v1/geo/routes/score` | required | Bearer | `geo.ScoreRoute` |
+| POST | `/v1/geo/geofences` | required | Bearer | `geo.CreateGeofence` |
+| GET | `/v1/geo/geofences` | required | Bearer | `geo.ListGeofences` |
+| DELETE | `/v1/geo/geofences/:id` | required | Bearer | `geo.DeleteGeofence` |
+| POST | `/v1/geo/geofences/check` | required | Bearer | `geo.TriggerGeofenceCheck` |
+| POST | `/v1/payments/deposits` | required | Bearer | `payments.Deposit` |
+| GET | `/v1/payments/wallet` | required | Bearer | `payments.GetWalletBalance` |
+| POST | `/v1/payments/transactions` | required | Bearer | `payments.InitiateTransaction` |
+| GET | `/healthz`, `/readyz` | — | — | — |
 
-Authenticate with `Authorization: Bearer <token>` from `/v1/auth/login`.
 Errors use one envelope, with a stable `code` for SDKs to branch on:
 
 ```json
 { "error": { "code": "invalid_argument", "message": "radius_m must be > 0" } }
 ```
 
-**The identity rule:** no request body on this API has a `user_id` field.
-Every `user_id` sent to a backend comes from the validated token, so a
-caller can only ever read and write its own data. The backends trust that
-guarantee — geo-engine takes `user_id` from the request body without
-re-checking it — which is why the gateway must be the only route in.
+### Two credentials
+
+Every `/v1` request carries two independent identities, and conflating
+them is the mistake worth avoiding:
+
+| Header | Answers | Comes from | Lives |
+|---|---|---|---|
+| `X-Atlas-Key: atl_live_…` | which application is calling | `atlas keys create` | your server, in an env var |
+| `Authorization: Bearer …` | which of your users is calling | `POST /v1/auth/login` | per user, per session |
+
+Neither substitutes for the other. Both are required even on register and
+login, because creating a user means creating them in a project.
+
+**The project key is a server-side secret.** Anyone holding it can act on
+your whole project, so it must not ship in a browser bundle or a mobile
+app.
+
+Health probes take neither: a liveness check that 401s would have
+Kubernetes restart every pod.
+
+### The identity rules
+
+**No request body on this API has a `user_id` or a `project_id` field.**
+Both are injected by the gateway — `user_id` from the validated token,
+`project_id` from the resolved key — so a caller can name neither. It can
+only present credentials that name them. The backends trust that
+guarantee, which is why the gateway must be the only route in, and they
+reject an absent `project_id` rather than defaulting: on the trusted side
+of the boundary a missing value is a bug, and defaulting would turn that
+bug into silent cross-tenant access.
+
+**A token is bound to the project that issued it.** The project is signed
+into the JWT at login, and the gateway 401s if it does not match the key
+the request arrived with. Tokens are handed to end users, and one of those
+users may run a competing app — without this check, anyone holding a token
+from project A could present it with their own project B key.
+
+### Tenant isolation
+
+Every data-plane table carries a `project_id`, every query is scoped by
+it, and three things are enforced by Postgres rather than by application
+code:
+
+* **Cross-tenant transfers are impossible.** Composite `(wallet,
+  project_id)` foreign keys mean a transfer whose wallets belong to
+  different projects fails at COMMIT.
+* **Email is unique per project**, not globally. Two customers can both
+  have `alice@example.com`; they are different people.
+* **Idempotency keys are scoped per project.** Two customers both using
+  `order-1` is normal — and before this, the second one was handed the
+  first one's transaction as a successful idempotent replay.
+
+`GET /v1/geo/nearby` is the query that made this urgent: it searches by
+position rather than by user id, so unscoped it returned every Atlas user
+near a point regardless of who asked.
 
 ### Payments and the placeholder provider
 
@@ -255,7 +311,14 @@ through Kafka. Each topic has exactly one producer.
 | `atlas.auth.tokens` | auth-service | auth-service | Cache invalidation fanout on revocation |
 | `atlas.elo.recompute` | — | — | Not yet wired; see below |
 
-Two things are worth knowing about this table.
+Three things are worth knowing about this table.
+
+**Every event carries a `project_id`.** A consumer runs long after the
+request that produced the event, so there is no header and no token left
+to derive a tenant from — it has to travel with the event. A consumer that
+receives one without a usable project skips and commits rather than
+retrying: a replay carries the same missing field, so retrying would wedge
+the partition on one bad record and stall every good one behind it.
 
 **Settlement is event-driven, not an API call.** `POST
 /v1/payments/transactions` creates a pending transaction and payments
@@ -317,18 +380,24 @@ uses the platform `fetch`.
 ```ts
 import { AtlasClient, AtlasError } from '@atlas/sdk';
 
-const atlas = new AtlasClient({ baseUrl: 'https://api.atlas.dev' });
+const atlas = new AtlasClient({
+  baseUrl: 'https://api.atlas.dev',
+  projectKey: process.env.ATLAS_KEY!,   // sent on every call
+});
 await atlas.auth.login({ email, password });   // token stored on the client
 
 const { users } = await atlas.geo.nearby({ lat, lng, radiusM: 500 });
 const { balanceCents } = await atlas.payments.wallet();
 ```
 
-Two things it inherits from the API design. No method takes a user id —
-identity comes from the token, mirroring the gateway's own rule — and
-`payments.createTransaction` always sends an idempotency key, which is
-what makes it the only POST the transport will retry. Errors arrive as
-`AtlasError` carrying the stable `code` from the envelope.
+Three things it inherits from the API design. No method takes a user id or
+a project id — both come from credentials, mirroring the gateway's own
+rules. `projectKey` is required and cannot be overridden by a caller-
+supplied `headers` option, so a stray header cannot silently retarget
+another project. And `payments.createTransaction` always sends an
+idempotency key, which is what makes it the only POST the transport will
+retry. Errors arrive as `AtlasError` carrying the stable `code` from the
+envelope.
 
 See `sdks/typescript/README.md` for the retry policy and the full surface.
 
