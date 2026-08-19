@@ -177,6 +177,15 @@ jobs:
           ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
         run: ./gradlew :consumers:fare-consumer:test --no-daemon
 
+      # Placed last on purpose: by now the suites above have written real
+      # rows, so the drill dumps a database with data rather than an empty
+      # schema. An empty database would still catch a broken dump flag,
+      # but not a restore that loses rows.
+      - name: Restore drill
+        env:
+          PGPASSWORD: atlas_dev
+        run: ./scripts/restore-drill.sh postgres://atlas:atlas_dev@localhost:5432/atlas
+
   compose:
     name: docker-compose syntax
     runs-on: ubuntu-latest

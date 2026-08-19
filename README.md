@@ -451,10 +451,16 @@ ever writes to a database it created and drops on exit — including when a
 check fails, so a red drill does not leave litter that makes the next one
 fail for an unrelated reason.
 
-It has been run: 17 tables, 62 indexes, 27 foreign keys, schema version
-70, all invariants green. It was also run against a deliberately broken
-backup — a `--data-only` dump, the classic silently-useless one — and
-failed as it should.
+It runs in CI, last in the integration job — by then the test suites have
+written real rows, so it dumps a database with data rather than an empty
+schema. An empty one would still catch a broken dump flag, but not a
+restore that loses rows.
+
+It has been run by hand too: 17 tables, 62 indexes, 27 foreign keys,
+schema version 70, all invariants green. And against a deliberately broken
+backup — a `--data-only` dump, the classic silently-useless one — where it
+failed as it should. A drill that has only ever passed has not been tested
+either.
 
 ## Rotating the JWT signing key
 
