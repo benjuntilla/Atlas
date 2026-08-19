@@ -2,6 +2,8 @@ package io.atlas.auth.db
 
 import io.atlas.auth.core.Session
 import io.atlas.auth.core.SessionRepository
+import io.atlas.auth.core.VerificationToken
+import io.atlas.auth.core.VerificationTokenRepository
 import io.atlas.auth.core.User
 import io.atlas.auth.core.UserRepository
 import org.jetbrains.exposed.exceptions.ExposedSQLException
@@ -29,6 +31,7 @@ private fun ResultRow.toUser() = User(
     email = this[Users.email],
     passwordHash = this[Users.passwordHash],
     createdAt = this[Users.createdAt],
+    emailVerifiedAt = this[Users.emailVerifiedAt],
 )
 
 private fun ResultRow.toSession() = Session(
@@ -37,6 +40,15 @@ private fun ResultRow.toSession() = Session(
     issuedAt = this[Sessions.issuedAt],
     expiresAt = this[Sessions.expiresAt],
     revoked = this[Sessions.revoked],
+)
+
+private fun ResultRow.toVerificationToken() = VerificationToken(
+    id = this[VerificationTokensTable.id],
+    projectId = this[VerificationTokensTable.projectId],
+    userId = this[VerificationTokensTable.userId],
+    purpose = this[VerificationTokensTable.purpose],
+    expiresAt = this[VerificationTokensTable.expiresAt],
+    usedAt = this[VerificationTokensTable.usedAt],
 )
 
 class ExposedUserRepository : UserRepository {
@@ -75,6 +87,84 @@ class ExposedUserRepository : UserRepository {
             throw e
         }
     }
+
+    override fun updatePasswordHash(projectId: UUID, userId: UUID, passwordHash: String) {
+        transaction {
+            Users.update({ (Users.projectId eq projectId) and (Users.id eq userId) }) {
+                it[Users.passwordHash] = passwordHash
+            }
+        }
+    }
+
+    // `AND email_verified_at IS NULL` keeps the FIRST confirmation time.
+    // Re-verifying is a no-op rather than a rewrite: "when was this
+    // confirmed" has one true answer.
+    override fun markEmailVerified(projectId: UUID, userId: UUID, at: Instant) {
+        transaction {
+            Users.update({
+                (Users.projectId eq projectId) and
+                    (Users.id eq userId) and
+                    (Users.emailVerifiedAt.isNull())
+            }) {
+                it[emailVerifiedAt] = at
+            }
+        }
+    }
+}
+
+/** Postgres-backed single-use tokens. See migration 0070. */
+class ExposedVerificationTokenRepository : VerificationTokenRepository {
+    override fun create(
+        projectId: UUID,
+        userId: UUID,
+        purpose: String,
+        tokenHash: String,
+        expiresAt: Instant,
+    ): VerificationToken = transaction {
+        val id = VerificationTokensTable.insert {
+            it[VerificationTokensTable.projectId] = projectId
+            it[VerificationTokensTable.userId] = userId
+            it[VerificationTokensTable.purpose] = purpose
+            it[VerificationTokensTable.tokenHash] = tokenHash
+            it[VerificationTokensTable.expiresAt] = expiresAt
+            it[createdAt] = Instant.now()
+        } get VerificationTokensTable.id
+        VerificationTokensTable.selectAll()
+            .where { VerificationTokensTable.id eq id }
+            .single().toVerificationToken()
+    }
+
+    override fun findByHash(tokenHash: String): VerificationToken? = transaction {
+        VerificationTokensTable.selectAll()
+            .where { VerificationTokensTable.tokenHash eq tokenHash }
+            .singleOrNull()?.toVerificationToken()
+    }
+
+    // `AND used_at IS NULL` is the single-use guarantee. Postgres reports
+    // how many rows the UPDATE touched, so two concurrent redemptions of
+    // the same token produce exactly one 1 and one 0 — no read-then-write
+    // window for both to slip through.
+    override fun consume(id: UUID, usedAt: Instant): Boolean = transaction {
+        VerificationTokensTable.update({
+            (VerificationTokensTable.id eq id) and
+                (VerificationTokensTable.usedAt.isNull())
+        }) {
+            it[VerificationTokensTable.usedAt] = usedAt
+        } > 0
+    }
+
+    override fun invalidateAll(projectId: UUID, userId: UUID, purpose: String, at: Instant) {
+        transaction {
+            VerificationTokensTable.update({
+                (VerificationTokensTable.projectId eq projectId) and
+                    (VerificationTokensTable.userId eq userId) and
+                    (VerificationTokensTable.purpose eq purpose) and
+                    (VerificationTokensTable.usedAt.isNull())
+            }) {
+                it[VerificationTokensTable.usedAt] = at
+            }
+        }
+    }
 }
 
 class ExposedSessionRepository : SessionRepository {
@@ -96,6 +186,12 @@ class ExposedSessionRepository : SessionRepository {
             Sessions.update({ Sessions.id eq id }) {
                 it[revoked] = true
             }
+        }
+    }
+
+    override fun revokeAllForUser(userId: UUID): Int = transaction {
+        Sessions.update({ (Sessions.userId eq userId) and (Sessions.revoked eq false) }) {
+            it[revoked] = true
         }
     }
 }

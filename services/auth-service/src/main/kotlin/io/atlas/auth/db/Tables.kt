@@ -15,6 +15,7 @@ object Users : Table("auth.users") {
     val email = text("email")
     val passwordHash = text("password_hash")
     val createdAt = timestamp("created_at")
+    val emailVerifiedAt = timestamp("email_verified_at").nullable()
 
     override val primaryKey = PrimaryKey(id)
 
@@ -34,6 +35,20 @@ object Sessions : Table("auth.sessions") {
     val issuedAt = timestamp("issued_at")
     val expiresAt = timestamp("expires_at")
     val revoked = bool("revoked").default(false)
+
+    override val primaryKey = PrimaryKey(id)
+}
+
+/** Matches migration 0070. One table serving both single-use flows. */
+object VerificationTokensTable : Table("auth.verification_tokens") {
+    val id = uuid("id").autoGenerate()
+    val projectId = uuid("project_id")
+    val userId = uuid("user_id")
+    val purpose = text("purpose")
+    val tokenHash = text("token_hash").uniqueIndex()
+    val expiresAt = timestamp("expires_at")
+    val usedAt = timestamp("used_at").nullable()
+    val createdAt = timestamp("created_at")
 
     override val primaryKey = PrimaryKey(id)
 }

@@ -193,6 +193,10 @@ speaks gRPC on a private network.
 | POST | `/v1/auth/login` | required | — | `auth.Authenticate` |
 | POST | `/v1/auth/logout` | required | Bearer | `auth.RevokeToken` |
 | GET | `/v1/auth/me` | required | Bearer | `auth.ValidateToken` |
+| POST | `/v1/auth/password-reset` | required | — | `auth.RequestPasswordReset` |
+| POST | `/v1/auth/password-reset/confirm` | required | — | `auth.ResetPassword` |
+| POST | `/v1/auth/email/verify` | required | — | `auth.RequestEmailVerification` |
+| POST | `/v1/auth/email/verify/confirm` | required | — | `auth.VerifyEmail` |
 | POST | `/v1/geo/locations` | required | Bearer | `geo.UpdateLocation` |
 | GET | `/v1/geo/nearby` | required | Bearer | `geo.GetNearby` |
 | POST | `/v1/geo/routes/score` | required | Bearer | `geo.ScoreRoute` |
@@ -334,6 +338,69 @@ section.
 fare-consumer reads. Those are acknowledgements, not instructions; acting
 on them would settle in response to having settled, forever. They are
 recorded in the audit log and nothing else.
+
+## Password reset and email verification
+
+Both are two steps: ask for a token by email, then redeem it. The redeem
+half needs no bearer token — whoever holds the emailed token is, for that
+one call, the person the account belongs to — and no project id, because
+the token names its own project and the person clicking a link has no idea
+what a project is.
+
+**The request half deliberately tells you nothing.** It answers `202
+{"accepted": true}` whether or not the address belongs to a user. An
+endpoint that distinguished them would be an account enumeration oracle,
+and the addresses it confirmed would be exactly the ones worth attacking.
+
+Other properties worth knowing:
+
+* Only the SHA-256 of a token is stored, the same rule API keys follow.
+  The plaintext exists in one place: the email.
+* Tokens are single-use, enforced by a conditional `UPDATE ... WHERE
+  used_at IS NULL` rather than a read-then-write, so two clicks on one
+  link cannot both succeed.
+* Requesting a new link invalidates the old one, so clicking "resend"
+  three times does not leave three live ways into an account in a mailbox.
+* A completed reset **revokes every session** and evicts them from the
+  validation cache immediately. Without that eviction a token issued
+  before the reset would keep working for the rest of the 30s cache TTL —
+  precisely the window the reset exists to close.
+* A verification token cannot reset a password and vice versa. They are
+  mailed under different pretexts, and "confirm your address" is far
+  easier to get someone to click.
+* Verification does **not** revoke sessions: confirming an address is not
+  evidence anything leaked.
+
+All four endpoints are on the strict credential quota — the request halves
+because an unthrottled one is a way to flood somebody's inbox using your
+sending reputation, the confirm halves because a token is the entire
+credential.
+
+### Atlas does not send mail
+
+`EmailSender` is a port, exactly like `PaymentProvider` on the money side.
+The only implementation is `LoggingEmailSender`, which writes the message
+to the log and returns success — right for local development, catastrophic
+in production, where it would print reset tokens into the log aggregator
+for anyone with log access to redeem.
+
+So the fake sender is only wired when `ATLAS_ALLOW_LOGGING_EMAIL=true` is
+set — shipping it has to be somebody's decision rather than a default
+nobody noticed. `docker-compose.yml` sets it; the Kubernetes manifests
+deliberately do not.
+
+With no provider configured the service still serves login and
+registration, and the four email endpoints answer **422
+`failed_precondition`** naming the missing configuration. Only the flows
+that need mail fail. The alternative — booting a fake sender by default —
+would accept reset requests and silently drop them, which a user
+experiences as "the email never arrived" and an operator sees as nothing
+at all.
+
+**Known gap:** `GET /v1/auth/me` does not yet report verification status,
+so an application cannot currently gate features on it. The state is
+recorded on `auth.users.email_verified_at`; surfacing it needs a user
+lookup that `ValidateToken`'s cache does not currently do.
 
 ## Safety scores
 

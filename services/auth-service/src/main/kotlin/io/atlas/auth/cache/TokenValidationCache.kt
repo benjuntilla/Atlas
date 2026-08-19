@@ -62,6 +62,26 @@ class TokenValidationCache(
         hashIndex.entries.removeIf { it.value == tokenHash }
     }
 
+    /**
+     * Drop every cached validation for one user.
+     *
+     * Needed by password reset, which revokes all of a user's sessions at
+     * once. Revocation is recorded in Postgres, but ValidateToken answers
+     * from this cache first — so without this a token issued before the
+     * reset keeps validating from memory for the rest of the TTL, which is
+     * precisely the window the reset exists to close.
+     *
+     * O(n) over the live cache, like [evictByTokenHash], and for the same
+     * reason: it happens once per reset, not once per request.
+     */
+    fun evictUser(userId: java.util.UUID) {
+        val removedKeys = cache.asMap().entries
+            .filter { it.value.userId == userId }
+            .map { it.key }
+        removedKeys.forEach { cache.invalidate(it) }
+        hashIndex.keys.removeAll(removedKeys.toSet())
+    }
+
     fun putWithHash(token: String, claims: TokenClaims, tokenHash: String) {
         val key = signatureSegment(token)
         cache.put(key, claims)

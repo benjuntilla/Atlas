@@ -15,6 +15,18 @@ service AuthService {
 
   rpc ValidateToken(ValidateTokenRequest) returns (TokenClaims);
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeResponse);
+
+  // Password reset and email verification. Both are two steps: ask for a
+  // token by email, then redeem it.
+  //
+  // The Request* calls return nothing and succeed whether or not the
+  // address exists. An endpoint that answered "no such user" would be an
+  // account enumeration oracle, and the addresses it confirmed would be
+  // exactly the ones worth attacking.
+  rpc RequestPasswordReset(RequestPasswordResetRequest) returns (RequestPasswordResetResponse);
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+  rpc RequestEmailVerification(RequestEmailVerificationRequest) returns (RequestEmailVerificationResponse);
+  rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
 }
 
 // `project_id` on the messages below is injected by the gateway from the
@@ -60,6 +72,10 @@ message ValidateTokenRequest {
 
 message TokenClaims {
   string user_id = 1;
+  // Note: verification state is NOT a token claim. It changes while a
+  // token is live, and a claim minted before verification would keep
+  // saying "unverified" for the rest of the session.
+
   double last_lat = 2;
   double last_lng = 3;
   int64 issued_at = 4;
@@ -73,3 +89,41 @@ message TokenClaims {
 
 message RevokeTokenRequest { string token = 1; }
 message RevokeResponse     { bool success = 1; }
+
+// --- Password reset / email verification ------------------------------------
+
+message RequestPasswordResetRequest {
+  string email = 1;
+  string project_id = 2;
+}
+
+// Deliberately empty. Any field here — "sent", "user_exists", a count —
+// would leak whether the address is registered.
+message RequestPasswordResetResponse {}
+
+message ResetPasswordRequest {
+  // The token from the email. It names its own project, so unlike every
+  // other call on this service there is no project_id to inject: the
+  // person redeeming it clicked a link and has no idea what a project is.
+  string token = 1;
+  string new_password = 2;
+}
+
+message ResetPasswordResponse {
+  string user_id = 1;
+}
+
+message RequestEmailVerificationRequest {
+  string email = 1;
+  string project_id = 2;
+}
+
+message RequestEmailVerificationResponse {}
+
+message VerifyEmailRequest {
+  string token = 1;
+}
+
+message VerifyEmailResponse {
+  string user_id = 1;
+}

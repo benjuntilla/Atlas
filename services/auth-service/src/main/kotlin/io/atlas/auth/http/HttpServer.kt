@@ -66,6 +66,12 @@ class MicrometerAuthMetrics(private val registry: MeterRegistry) : AuthMetrics {
     private val validatedMiss = registry.counter("atlas_auth_tokens_validated_total", "cache", "miss")
     private val revoked = registry.counter("atlas_auth_tokens_revoked_total")
 
+    // The gap between requested and completed is the interesting signal:
+    // resets asked for but never finished mean links are not arriving.
+    private val resetRequested = registry.counter("atlas_auth_password_resets_requested_total")
+    private val resetCompleted = registry.counter("atlas_auth_password_resets_completed_total")
+    private val emailsVerified = registry.counter("atlas_auth_emails_verified_total")
+
     override fun userRegistered() = registered.increment()
 
     override fun authenticated() = authenticatedOk.increment()
@@ -83,6 +89,19 @@ class MicrometerAuthMetrics(private val registry: MeterRegistry) : AuthMetrics {
         registry.counter("atlas_auth_tokens_rejected_total", "reason", reason).increment()
 
     override fun tokenRevoked() = revoked.increment()
+
+    override fun passwordResetRequested() = resetRequested.increment()
+
+    override fun passwordReset() = resetCompleted.increment()
+
+    // Same label-key rule as authentications above: this counter always
+    // carries `reason`, so the rejection series and any future success
+    // series stay compatible.
+    override fun passwordResetRejected(reason: String) =
+        registry.counter("atlas_auth_password_resets_rejected_total", "reason", reason)
+            .increment()
+
+    override fun emailVerified() = emailsVerified.increment()
 
     override fun tokenEventPublishFailed(reason: String) =
         registry.counter("atlas_auth_token_events_failed_total", "reason", reason).increment()

@@ -23,6 +23,17 @@ interface UserRepository {
      * different person and is allowed.
      */
     fun create(projectId: UUID, email: String, passwordHash: String): User
+
+    /** Replace the stored hash. Used by password reset. */
+    fun updatePasswordHash(projectId: UUID, userId: UUID, passwordHash: String)
+
+    /**
+     * Stamp the address as confirmed. Idempotent: re-verifying keeps the
+     * ORIGINAL timestamp, because "when was this address confirmed" has
+     * one true answer and a second click on the same link should not
+     * rewrite history.
+     */
+    fun markEmailVerified(projectId: UUID, userId: UUID, at: Instant)
 }
 
 interface SessionRepository {
@@ -30,4 +41,14 @@ interface SessionRepository {
     fun findById(id: UUID): Session?
     /** Marks the session revoked. No-op if already revoked or unknown. */
     fun revoke(id: UUID)
+
+    /**
+     * Revoke every live session for one user, returning how many.
+     *
+     * A password reset is a statement that the old credential may be
+     * compromised. Leaving existing sessions alive would mean an attacker
+     * who logged in before the reset stays logged in afterwards — the
+     * user does everything right and is still not safe.
+     */
+    fun revokeAllForUser(userId: UUID): Int
 }

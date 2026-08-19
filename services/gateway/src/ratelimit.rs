@@ -131,10 +131,22 @@ fn is_exempt_path(path: &str) -> bool {
 }
 
 /// Whether a path is a credential endpoint deserving the strict quota.
+///
+/// Password reset and email verification belong here for two separate
+/// reasons. The REQUEST halves send mail to an address the caller names,
+/// so an unthrottled one is a way to use Atlas to flood somebody's inbox
+/// — and to burn the sending domain's reputation while doing it. The
+/// CONFIRM halves take a token as the entire credential, which makes them
+/// the one place in the API where guessing has a prize; 256 bits is not
+/// brute-forceable, but a limiter is what keeps that true if the token
+/// generator is ever weakened.
 fn is_credential_path(path: &str) -> bool {
     // Matched on the concrete path rather than the route template because
     // the middleware runs before routing has resolved a MatchedPath.
-    path.starts_with("/v1/auth/login") || path.starts_with("/v1/auth/register")
+    path.starts_with("/v1/auth/login")
+        || path.starts_with("/v1/auth/register")
+        || path.starts_with("/v1/auth/password-reset")
+        || path.starts_with("/v1/auth/email/verify")
 }
 
 /// Build the limiter key for a request.
@@ -317,6 +329,12 @@ mod tests {
     fn credential_paths_are_recognised() {
         assert!(is_credential_path("/v1/auth/login"));
         assert!(is_credential_path("/v1/auth/register"));
+        // Both halves of each flow: one mails a stranger, the other
+        // accepts a token as the whole credential.
+        assert!(is_credential_path("/v1/auth/password-reset"));
+        assert!(is_credential_path("/v1/auth/password-reset/confirm"));
+        assert!(is_credential_path("/v1/auth/email/verify"));
+        assert!(is_credential_path("/v1/auth/email/verify/confirm"));
         assert!(!is_credential_path("/v1/auth/me"));
         assert!(!is_credential_path("/v1/geo/nearby"));
         assert!(!is_credential_path("/healthz"));

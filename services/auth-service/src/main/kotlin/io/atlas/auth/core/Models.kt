@@ -17,6 +17,8 @@ data class User(
     val email: String,
     val passwordHash: String,
     val createdAt: Instant,
+    /** When the address was confirmed; null means unverified. */
+    val emailVerifiedAt: Instant? = null,
 )
 
 data class Session(

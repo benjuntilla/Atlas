@@ -18,6 +18,16 @@ data class EnvConfig(
     /** Prometheus scrape + /healthz. Never expose this publicly. */
     val httpPort: Int,
     val tokenLifetimeSeconds: Long,
+    /**
+     * Whether to accept the development email sender, which logs messages
+     * instead of delivering them.
+     *
+     * Defaults to false so a deployment that forgot to configure a mail
+     * provider fails at startup rather than silently printing password
+     * reset tokens into the log aggregator, where anyone with log access
+     * could redeem them.
+     */
+    val allowLoggingEmail: Boolean,
 ) {
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): EnvConfig {
@@ -34,6 +44,8 @@ data class EnvConfig(
                 grpcPort = env["GRPC_PORT"]?.toInt() ?: 50051,
                 httpPort = env["HTTP_PORT"]?.toInt() ?: 8051,
                 tokenLifetimeSeconds = env["TOKEN_LIFETIME_SECONDS"]?.toLong() ?: 3600,
+                allowLoggingEmail =
+                    env["ATLAS_ALLOW_LOGGING_EMAIL"]?.equals("true", ignoreCase = true) ?: false,
             )
         }
 

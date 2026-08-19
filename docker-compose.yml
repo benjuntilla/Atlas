@@ -101,6 +101,11 @@ services:
       migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
+      # Development only. auth-service refuses to start without this,
+      # because its only email implementation LOGS messages instead of
+      # sending them — which puts password reset tokens in the log. Never
+      # set it in a deployed environment; wire a real provider there.
+      ATLAS_ALLOW_LOGGING_EMAIL: "true"
       DATABASE_URL: postgres://atlas:atlas_dev@postgres:5432/atlas
       KAFKA_BROKERS: kafka:29092
       JWT_SECRET: dev_secret_change_in_prod_dev_secret_change_in_prod

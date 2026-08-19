@@ -3,11 +3,13 @@ package io.atlas.auth
 import io.atlas.auth.cache.TokenValidationCache
 import io.atlas.auth.config.EnvConfig
 import io.atlas.auth.core.AuthService
+import io.atlas.auth.core.LoggingEmailSender
 import io.atlas.auth.crypto.BcryptPasswordHasher
 import io.atlas.auth.crypto.Jose4jJwtSigner
 import io.atlas.auth.db.DatabaseBootstrap
 import io.atlas.auth.db.ExposedSessionRepository
 import io.atlas.auth.db.ExposedUserRepository
+import io.atlas.auth.db.ExposedVerificationTokenRepository
 import io.atlas.auth.grpc.AuthGrpcService
 import io.atlas.auth.grpc.HealthCheck
 import io.atlas.auth.http.MicrometerAuthMetrics
@@ -47,8 +49,35 @@ fun main() {
 
     val users = ExposedUserRepository()
     val sessions = ExposedSessionRepository()
+    val verificationTokens = ExposedVerificationTokenRepository()
     val hasher = BcryptPasswordHasher(cost = 12)
     val signer = Jose4jJwtSigner(config.jwtSecret)
+
+    // Atlas sends no mail itself; this is the seam a provider plugs into.
+    // The logging sender prints the reset token to the log, which is what
+    // makes local development possible and what makes production
+    // dangerous — so it has to be asked for by name.
+    val emailSender = if (config.allowLoggingEmail) {
+        LOG.warn(
+            "using LoggingEmailSender: password reset tokens WILL be written " +
+                "to the log. Never set ATLAS_ALLOW_LOGGING_EMAIL in production.",
+        )
+        LoggingEmailSender()
+    } else {
+        // Null, not a fake. The service still serves login and
+        // registration; the two flows that need mail answer 412 naming
+        // the missing configuration. Booting a fake sender by default
+        // would instead accept reset requests and drop them, which a user
+        // experiences as "the email never arrived" and an operator sees
+        // as nothing at all.
+        LOG.warn(
+            "no email provider configured: password reset and email " +
+                "verification will return FAILED_PRECONDITION. Set " +
+                "ATLAS_ALLOW_LOGGING_EMAIL=true for development.",
+        )
+        null
+    }
+
     val authService = AuthService(
         users = users,
         sessions = sessions,
@@ -56,6 +85,8 @@ fun main() {
         signer = signer,
         tokenLifetime = Duration.ofSeconds(config.tokenLifetimeSeconds),
         clock = Clock.systemUTC(),
+        verificationTokens = verificationTokens,
+        email = emailSender,
     )
 
     val registry = newPrometheusRegistry()

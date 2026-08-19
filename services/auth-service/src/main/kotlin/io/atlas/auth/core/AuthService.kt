@@ -23,6 +23,19 @@ class AuthService(
     private val signer: JwtSigner,
     private val tokenLifetime: Duration = Duration.ofHours(1),
     private val clock: Clock = Clock.systemUTC(),
+    private val verificationTokens: VerificationTokenRepository? = null,
+    private val email: EmailSender? = null,
+    /**
+     * How long a reset link stays valid. Short, because the window is the
+     * period during which someone with access to the mailbox — a shared
+     * computer, a synced device, a forwarding rule — can take the account.
+     */
+    private val resetTokenLifetime: Duration = Duration.ofHours(1),
+    /**
+     * Longer, because the cost of an expired verification link is a minor
+     * annoyance rather than a lost account, and people check mail late.
+     */
+    private val verificationTokenLifetime: Duration = Duration.ofHours(24),
 ) {
     /**
      * Creates a new user. Throws [AuthError.EmailAlreadyExists] if the email
@@ -138,6 +151,179 @@ class AuthService(
             throw AuthError.WeakPassword("must contain non-whitespace characters")
         }
     }
+
+    // --- password reset ---------------------------------------------------
+
+    /**
+     * Mail a reset link, if the address belongs to a user in this project.
+     *
+     * # This method tells the caller nothing
+     *
+     * It returns Unit and takes the same path whether or not the address
+     * exists. That is deliberate and it is the whole security property:
+     * an endpoint that answers "no such user" is an account enumeration
+     * oracle, and the addresses it confirms are exactly the ones worth
+     * attacking. The user who genuinely mistyped their address learns
+     * nothing either — which is the cost, and it is smaller than the
+     * alternative.
+     */
+    fun requestPasswordReset(projectId: UUID, email: String) {
+        val tokens = requireTokens()
+        val sender = requireEmail()
+        val normalized = normalizeEmail(email)
+        val user = users.findByEmail(projectId, normalized)
+            ?: return  // Silently. See above.
+
+        val now = clock.instant()
+        // Any earlier link stops working the moment a new one is issued,
+        // so a user who clicks "resend" three times cannot leave three
+        // live ways into their account lying in a mailbox.
+        tokens.invalidateAll(projectId, user.id, TokenPurpose.PASSWORD_RESET, now)
+
+        val plaintext = VerificationTokens.generate()
+        tokens.create(
+            projectId = projectId,
+            userId = user.id,
+            purpose = TokenPurpose.PASSWORD_RESET,
+            tokenHash = VerificationTokens.hash(plaintext),
+            expiresAt = now.plus(resetTokenLifetime),
+        )
+
+        sender.send(
+            EmailMessage(
+                to = user.email,
+                subject = "Reset your password",
+                body = "Use this token to set a new password. It expires in " +
+                    "${resetTokenLifetime.toHours()} hour(s) and can be used once:" +
+                    "\n\n$plaintext\n\n" +
+                    "If you did not ask for this, you can ignore it — your " +
+                    "password has not changed.",
+            ),
+        )
+    }
+
+    /**
+     * Redeem a reset token and set a new password.
+     *
+     * Throws [AuthError.TokenInvalid] for anything wrong with the token —
+     * unknown, expired, already used, or for a different purpose. One
+     * error for all four cases on purpose: distinguishing them tells a
+     * holder of a guessed token which guesses are getting warmer.
+     */
+    fun resetPassword(token: String, newPassword: String): UUID {
+        val tokens = requireTokens()
+        validatePassword(newPassword)
+
+        val now = clock.instant()
+        val row = tokens.findByHash(VerificationTokens.hash(token))
+            ?: throw AuthError.TokenInvalid("invalid or expired token")
+        if (row.purpose != TokenPurpose.PASSWORD_RESET) {
+            // A verification token must not double as a reset token: they
+            // are mailed under different pretexts and one is far easier to
+            // get a user to click.
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+        if (row.usedAt != null || !now.isBefore(row.expiresAt)) {
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+
+        // Consume FIRST. If two clicks arrive together this is the
+        // conditional UPDATE that lets exactly one through; doing the
+        // password change first would let both apply, and the second
+        // would silently overwrite the first user's chosen password.
+        if (!tokens.consume(row.id, now)) {
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+
+        users.updatePasswordHash(row.projectId, row.userId, hasher.hash(newPassword))
+
+        // Everything else that was outstanding stops working: other reset
+        // links, and every live session. A reset is a statement that the
+        // old credential may be compromised, so a session established with
+        // it must not survive.
+        tokens.invalidateAll(row.projectId, row.userId, TokenPurpose.PASSWORD_RESET, now)
+        sessions.revokeAllForUser(row.userId)
+
+        return row.userId
+    }
+
+    // --- email verification -----------------------------------------------
+
+    /**
+     * Mail a verification link. Silent for an unknown address and for one
+     * already verified, for the same enumeration reason as above.
+     */
+    fun requestEmailVerification(projectId: UUID, email: String) {
+        val tokens = requireTokens()
+        val sender = requireEmail()
+        val normalized = normalizeEmail(email)
+        val user = users.findByEmail(projectId, normalized) ?: return
+        if (user.emailVerifiedAt != null) return
+
+        val now = clock.instant()
+        tokens.invalidateAll(projectId, user.id, TokenPurpose.EMAIL_VERIFICATION, now)
+
+        val plaintext = VerificationTokens.generate()
+        tokens.create(
+            projectId = projectId,
+            userId = user.id,
+            purpose = TokenPurpose.EMAIL_VERIFICATION,
+            tokenHash = VerificationTokens.hash(plaintext),
+            expiresAt = now.plus(verificationTokenLifetime),
+        )
+
+        sender.send(
+            EmailMessage(
+                to = user.email,
+                subject = "Confirm your email address",
+                body = "Use this token to confirm this address. It expires in " +
+                    "${verificationTokenLifetime.toHours()} hours:\n\n$plaintext\n",
+            ),
+        )
+    }
+
+    /**
+     * Redeem a verification token.
+     *
+     * Unlike a reset this does NOT revoke sessions: confirming an address
+     * is not evidence the password leaked, and logging someone out for
+     * doing what they were asked to do is a bad trade.
+     */
+    fun verifyEmail(token: String): UUID {
+        val tokens = requireTokens()
+        val now = clock.instant()
+
+        val row = tokens.findByHash(VerificationTokens.hash(token))
+            ?: throw AuthError.TokenInvalid("invalid or expired token")
+        if (row.purpose != TokenPurpose.EMAIL_VERIFICATION) {
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+        if (row.usedAt != null || !now.isBefore(row.expiresAt)) {
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+        if (!tokens.consume(row.id, now)) {
+            throw AuthError.TokenInvalid("invalid or expired token")
+        }
+
+        users.markEmailVerified(row.projectId, row.userId, now)
+        return row.userId
+    }
+
+    // --- helpers ----------------------------------------------------------
+
+    /**
+     * These flows are optional at construction, so a deployment with no
+     * mail provider still serves login and registration. Reaching one
+     * without the dependency wired is a 412 naming the missing
+     * configuration — far better than a reset endpoint that accepts the
+     * request and silently does nothing, which is what a user experiences
+     * as "the email never arrived".
+     */
+    private fun requireTokens(): VerificationTokenRepository =
+        verificationTokens ?: throw AuthError.EmailNotConfigured()
+
+    private fun requireEmail(): EmailSender =
+        email ?: throw AuthError.EmailNotConfigured()
 
     companion object {
         const val MIN_PASSWORD_LENGTH = 8

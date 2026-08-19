@@ -10,6 +10,21 @@ package io.atlas.auth.core
  * emails.
  */
 sealed class AuthError(message: String) : Exception(message) {
+    /**
+     * A flow was used that needs an email provider, and none is wired.
+     *
+     * This is deliberately a per-CALL error rather than a startup failure.
+     * Login and registration do not need email; refusing to boot the whole
+     * service because password reset is unconfigured would take down
+     * authentication for everyone to protect a feature nobody was using.
+     * The feature that needs the provider fails; nothing else does.
+     */
+    class EmailNotConfigured :
+        AuthError(
+            "email delivery is not configured; password reset and email " +
+                "verification are unavailable",
+        )
+
     class EmailAlreadyExists(email: String) : AuthError("email already registered: $email")
     class InvalidEmail(email: String) : AuthError("invalid email address: $email")
     class WeakPassword(reason: String) : AuthError("weak password: $reason")

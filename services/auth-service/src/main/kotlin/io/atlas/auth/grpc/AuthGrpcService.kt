@@ -5,6 +5,14 @@ import atlas.auth.AuthServiceGrpcKt
 import atlas.auth.IssueTokenRequest
 import atlas.auth.RegisterRequest
 import atlas.auth.RegisterResponse
+import atlas.auth.RequestEmailVerificationRequest
+import atlas.auth.RequestEmailVerificationResponse
+import atlas.auth.RequestPasswordResetRequest
+import atlas.auth.RequestPasswordResetResponse
+import atlas.auth.ResetPasswordRequest
+import atlas.auth.ResetPasswordResponse
+import atlas.auth.VerifyEmailRequest
+import atlas.auth.VerifyEmailResponse
 import atlas.auth.RevokeResponse
 import atlas.auth.RevokeTokenRequest
 import atlas.auth.TokenResponse
@@ -156,6 +164,62 @@ class AuthGrpcService(
         return RevokeResponse.newBuilder().setSuccess(true).build()
     }
 
+    // --- password reset / email verification -------------------------------
+
+    override suspend fun requestPasswordReset(
+        request: RequestPasswordResetRequest,
+    ): RequestPasswordResetResponse {
+        val projectId = request.projectId.toProjectId()
+        try {
+            authService.requestPasswordReset(projectId, request.email)
+        } catch (e: AuthError) {
+            // Reaching here means a validation error on the address, which
+            // is still an answer about whether it could exist. Swallow it:
+            // the response is identical either way, by design.
+            LOG.debug("password reset request rejected: {}", e.metricReason())
+        }
+        metrics.passwordResetRequested()
+        return RequestPasswordResetResponse.getDefaultInstance()
+    }
+
+    override suspend fun resetPassword(request: ResetPasswordRequest): ResetPasswordResponse {
+        val userId = try {
+            authService.resetPassword(request.token, request.newPassword)
+        } catch (e: AuthError) {
+            metrics.passwordResetRejected(e.metricReason())
+            throw e.toGrpcStatusException()
+        }
+        metrics.passwordReset()
+        // Every session for this user was just revoked, so the validation
+        // cache must forget them too — otherwise a token issued before the
+        // reset keeps validating from memory for the rest of the TTL,
+        // which is exactly the window the reset exists to close.
+        cache.evictUser(userId)
+        return ResetPasswordResponse.newBuilder().setUserId(userId.toString()).build()
+    }
+
+    override suspend fun requestEmailVerification(
+        request: RequestEmailVerificationRequest,
+    ): RequestEmailVerificationResponse {
+        val projectId = request.projectId.toProjectId()
+        try {
+            authService.requestEmailVerification(projectId, request.email)
+        } catch (e: AuthError) {
+            LOG.debug("verification request rejected: {}", e.metricReason())
+        }
+        return RequestEmailVerificationResponse.getDefaultInstance()
+    }
+
+    override suspend fun verifyEmail(request: VerifyEmailRequest): VerifyEmailResponse {
+        val userId = try {
+            authService.verifyEmail(request.token)
+        } catch (e: AuthError) {
+            throw e.toGrpcStatusException()
+        }
+        metrics.emailVerified()
+        return VerifyEmailResponse.newBuilder().setUserId(userId.toString()).build()
+    }
+
     // --- helpers ----------------------------------------------------------
 
     private fun publishIssued(signed: SignedToken) {
@@ -233,6 +297,7 @@ private fun AuthError.metricReason(): String = when (this) {
     is AuthError.TokenInvalid -> "token_invalid"
     is AuthError.SessionRevoked -> "session_revoked"
     is AuthError.SessionExpired -> "session_expired"
+    is AuthError.EmailNotConfigured -> "email_not_configured"
 }
 
 private fun AuthError.toGrpcStatusException(): StatusException = when (this) {
@@ -243,4 +308,8 @@ private fun AuthError.toGrpcStatusException(): StatusException = when (this) {
     is AuthError.TokenInvalid -> Status.UNAUTHENTICATED.withDescription(message).asException()
     is AuthError.SessionRevoked -> Status.PERMISSION_DENIED.withDescription(message).asException()
     is AuthError.SessionExpired -> Status.UNAUTHENTICATED.withDescription(message).asException()
+    // The caller did nothing wrong and retrying will not help until an
+    // operator configures a provider, which is exactly FAILED_PRECONDITION.
+    is AuthError.EmailNotConfigured ->
+        Status.FAILED_PRECONDITION.withDescription(message).asException()
 }

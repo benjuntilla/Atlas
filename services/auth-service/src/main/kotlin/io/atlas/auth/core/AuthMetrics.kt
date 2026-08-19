@@ -45,6 +45,12 @@ interface AuthMetrics {
 
     fun tokenRevoked()
 
+    /** Requested, whether or not the address existed — see the RPC doc. */
+    fun passwordResetRequested()
+    fun passwordReset()
+    fun passwordResetRejected(reason: String)
+    fun emailVerified()
+
     /**
      * A token lifecycle event that never reached Kafka. [reason] is one of a
      * small fixed set: delivery, send, rejected, queue_full.
@@ -64,6 +70,10 @@ interface AuthMetrics {
             override fun tokenValidated(cacheHit: Boolean) {}
             override fun tokenRejected(reason: String) {}
             override fun tokenRevoked() {}
+            override fun passwordResetRequested() {}
+            override fun passwordReset() {}
+            override fun passwordResetRejected(reason: String) {}
+            override fun emailVerified() {}
             override fun tokenEventPublishFailed(reason: String) {}
         }
     }

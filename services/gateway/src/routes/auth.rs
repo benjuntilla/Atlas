@@ -17,7 +17,10 @@ use tonic::Request;
 
 use crate::error::ApiError;
 use crate::extract::AuthUser;
-use crate::pb::auth::{AuthRequest, RegisterRequest, RevokeTokenRequest};
+use crate::pb::auth::{
+    AuthRequest, RegisterRequest, RequestEmailVerificationRequest, RequestPasswordResetRequest,
+    ResetPasswordRequest, RevokeTokenRequest, VerifyEmailRequest,
+};
 use crate::state::AppState;
 use crate::tenant::Tenant;
 use crate::validate;
@@ -28,6 +31,10 @@ pub fn routes() -> Router<AppState> {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/me", get(me))
+        .route("/password-reset", post(request_password_reset))
+        .route("/password-reset/confirm", post(confirm_password_reset))
+        .route("/email/verify", post(request_email_verification))
+        .route("/email/verify/confirm", post(confirm_email_verification))
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,4 +193,147 @@ async fn me(user: AuthUser) -> Json<MeOut> {
         issued_at: user.issued_at,
         expires_at: user.expires_at,
     })
+}
+
+// --- password reset ---------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct EmailBody {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AcceptedOut {
+    /// Always true. See the handler doc for why there is nothing else here.
+    pub accepted: bool,
+}
+
+/// Ask for a password reset link.
+///
+/// # This endpoint deliberately tells you nothing
+///
+/// It answers 202 with the same body whether or not the address belongs to
+/// a user, and it does so for every syntactically plausible input. An
+/// endpoint that distinguished them would be an account enumeration
+/// oracle: anyone could feed it a list of addresses and learn which ones
+/// have accounts, and those are exactly the ones worth attacking.
+///
+/// The cost is real — someone who mistypes their address gets the same
+/// answer as someone who did not — and it is smaller than the alternative.
+async fn request_password_reset(
+    State(state): State<AppState>,
+    tenant: Tenant,
+    Json(body): Json<EmailBody>,
+) -> Result<(StatusCode, Json<AcceptedOut>), ApiError> {
+    // Not even the empty case is rejected differently: a 400 here would
+    // still be a distinguishable response, and there is no value in
+    // telling a caller their empty string is empty.
+    let _ = state
+        .auth
+        .clone()
+        .request_password_reset(Request::new(RequestPasswordResetRequest {
+            email: body.email,
+            project_id: tenant.project_id.to_string(),
+        }))
+        .await;
+
+    Ok((StatusCode::ACCEPTED, Json(AcceptedOut { accepted: true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmResetBody {
+    pub token: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserIdOut {
+    pub user_id: String,
+}
+
+/// Redeem a reset token and set a new password.
+///
+/// Takes no project key check beyond the layer's, and needs no bearer
+/// token: whoever holds the emailed token is, for this one call, the
+/// person the account belongs to. The token names its own project, so
+/// there is nothing for the caller to supply.
+///
+/// Succeeding here revokes every session the user had. That is the point
+/// — a reset says the old credential may be compromised, so a session
+/// established with it must not survive.
+async fn confirm_password_reset(
+    State(state): State<AppState>,
+    Json(body): Json<ConfirmResetBody>,
+) -> Result<Json<UserIdOut>, ApiError> {
+    if body.token.trim().is_empty() || body.new_password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "token and new_password are required".to_string(),
+        ));
+    }
+
+    let resp = state
+        .auth
+        .clone()
+        .reset_password(Request::new(ResetPasswordRequest {
+            token: body.token,
+            new_password: body.new_password,
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("auth", s))?
+        .into_inner();
+
+    Ok(Json(UserIdOut {
+        user_id: resp.user_id,
+    }))
+}
+
+// --- email verification -----------------------------------------------------
+
+/// Ask for a verification link. Silent about existence, same as reset.
+async fn request_email_verification(
+    State(state): State<AppState>,
+    tenant: Tenant,
+    Json(body): Json<EmailBody>,
+) -> Result<(StatusCode, Json<AcceptedOut>), ApiError> {
+    let _ = state
+        .auth
+        .clone()
+        .request_email_verification(Request::new(RequestEmailVerificationRequest {
+            email: body.email,
+            project_id: tenant.project_id.to_string(),
+        }))
+        .await;
+
+    Ok((StatusCode::ACCEPTED, Json(AcceptedOut { accepted: true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmVerificationBody {
+    pub token: String,
+}
+
+/// Redeem a verification token.
+///
+/// Unlike a reset this does not revoke sessions: confirming an address is
+/// not evidence that anything leaked, and logging someone out for doing
+/// what they were asked to do is a bad trade.
+async fn confirm_email_verification(
+    State(state): State<AppState>,
+    Json(body): Json<ConfirmVerificationBody>,
+) -> Result<Json<UserIdOut>, ApiError> {
+    if body.token.trim().is_empty() {
+        return Err(ApiError::BadRequest("token is required".to_string()));
+    }
+
+    let resp = state
+        .auth
+        .clone()
+        .verify_email(Request::new(VerifyEmailRequest { token: body.token }))
+        .await
+        .map_err(|s| ApiError::upstream("auth", s))?
+        .into_inner();
+
+    Ok(Json(UserIdOut {
+        user_id: resp.user_id,
+    }))
 }
