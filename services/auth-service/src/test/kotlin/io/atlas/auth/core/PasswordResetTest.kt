@@ -365,4 +365,24 @@ class PasswordResetTest {
             service.verifyEmail("f".repeat(64))
         }
     }
+
+    // --- getUser ------------------------------------------------------------
+
+    @Test
+    fun `getUser reports verification state and is project scoped`() {
+        val h = harness()
+        val id = h.service.register(projectA, "alice@example.com", "a-good-password")
+
+        val before = h.service.getUser(projectA, id)
+        assertEquals("alice@example.com", before.email)
+        assertNull(before.emailVerifiedAt, "starts unverified")
+
+        h.service.requestEmailVerification(projectA, "alice@example.com")
+        h.service.verifyEmail(tokenFrom(h.email.sent.single()))
+
+        assertNotNull(h.service.getUser(projectA, id).emailVerifiedAt)
+
+        // A real user id, wrong project: must not resolve.
+        assertFailsWith<AuthError.InvalidCredentials> { h.service.getUser(projectB, id) }
+    }
 }

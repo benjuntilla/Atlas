@@ -27,6 +27,16 @@ service AuthService {
   rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
   rpc RequestEmailVerification(RequestEmailVerificationRequest) returns (RequestEmailVerificationResponse);
   rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
+
+  // Current state of one user.
+  //
+  // Separate from ValidateToken because the two answer different
+  // questions with different lifetimes. Token claims are FIXED at issue
+  // and cached for 30s; a user's profile CHANGES while a token is live —
+  // verifying an address is exactly such a change. Folding the profile
+  // into the cached claims would serve a stale "unverified" for the rest
+  // of the TTL to the user who just clicked the link.
+  rpc GetUser(GetUserRequest) returns (UserProfile);
 }
 
 // `project_id` on the messages below is injected by the gateway from the
@@ -126,4 +136,19 @@ message VerifyEmailRequest {
 
 message VerifyEmailResponse {
   string user_id = 1;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+  string project_id = 2;
+}
+
+message UserProfile {
+  string user_id = 1;
+  string email = 2;
+  int64  created_at = 3;
+  // Unix seconds, or 0 for an unverified address. proto3 has no optional
+  // scalars, and 0 is unambiguous here: no address was ever confirmed at
+  // the epoch.
+  int64  email_verified_at = 4;
 }

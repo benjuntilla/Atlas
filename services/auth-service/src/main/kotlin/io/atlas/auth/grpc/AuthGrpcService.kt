@@ -3,6 +3,7 @@ package io.atlas.auth.grpc
 import atlas.auth.AuthRequest
 import atlas.auth.AuthServiceGrpcKt
 import atlas.auth.IssueTokenRequest
+import atlas.auth.GetUserRequest
 import atlas.auth.RegisterRequest
 import atlas.auth.RegisterResponse
 import atlas.auth.RequestEmailVerificationRequest
@@ -16,6 +17,7 @@ import atlas.auth.VerifyEmailResponse
 import atlas.auth.RevokeResponse
 import atlas.auth.RevokeTokenRequest
 import atlas.auth.TokenResponse
+import atlas.auth.UserProfile
 import atlas.auth.ValidateTokenRequest
 import io.atlas.auth.cache.TokenValidationCache
 import io.atlas.auth.core.AuthError
@@ -162,6 +164,28 @@ class AuthGrpcService(
             LOG.warn("publishRevoked threw; revocation still persisted", e)
         }
         return RevokeResponse.newBuilder().setSuccess(true).build()
+    }
+
+    override suspend fun getUser(request: GetUserRequest): UserProfile {
+        val projectId = request.projectId.toProjectId()
+        val userId = try {
+            UUID.fromString(request.userId)
+        } catch (e: IllegalArgumentException) {
+            throw Status.INVALID_ARGUMENT.withDescription("user_id is not a UUID").asException()
+        }
+        val user = try {
+            authService.getUser(projectId, userId)
+        } catch (e: AuthError) {
+            throw e.toGrpcStatusException()
+        }
+        return UserProfile.newBuilder()
+            .setUserId(user.id.toString())
+            .setEmail(user.email)
+            .setCreatedAt(user.createdAt.epochSecond)
+            // 0 for unverified: proto3 has no optional scalars, and no
+            // address was ever confirmed at the epoch.
+            .setEmailVerifiedAt(user.emailVerifiedAt?.epochSecond ?: 0L)
+            .build()
     }
 
     // --- password reset / email verification -------------------------------

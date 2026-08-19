@@ -179,7 +179,71 @@ class AuthApi {
     return res;
   }
 
-  /** The current token's claims. Useful for checking a session is still live. */
+  /**
+   * Ask Atlas to mail this address a password reset link.
+   *
+   * Resolves the same way whether or not the address has an account. That
+   * is deliberate on the server side — an endpoint that distinguished
+   * them would let anyone test a list of addresses for which have
+   * accounts — so do not build a UI that claims the address was found.
+   */
+  async requestPasswordReset(params: { email: string }): Promise<void> {
+    await this.http.request<{ accepted: boolean }>({
+      method: 'POST',
+      path: '/v1/auth/password-reset',
+      body: { email: params.email },
+    });
+  }
+
+  /**
+   * Redeem a reset token and set a new password.
+   *
+   * Needs no logged-in session: whoever holds the emailed token is, for
+   * this one call, the account's owner. Succeeding revokes every session
+   * the user had, including this client's — call `login` afterwards.
+   */
+  async resetPassword(params: { token: string; newPassword: string }): Promise<{ userId: string }> {
+    const res = await this.http.request<{ user_id: string }>({
+      method: 'POST',
+      path: '/v1/auth/password-reset/confirm',
+      body: { token: params.token, new_password: params.newPassword },
+    });
+    // The server just revoked every session; holding the dead token would
+    // only produce confusing 403s on the next call.
+    this.holder.setToken(undefined);
+    return { userId: res.user_id };
+  }
+
+  /** Ask Atlas to mail this address a verification link. Also silent. */
+  async requestEmailVerification(params: { email: string }): Promise<void> {
+    await this.http.request<{ accepted: boolean }>({
+      method: 'POST',
+      path: '/v1/auth/email/verify',
+      body: { email: params.email },
+    });
+  }
+
+  /**
+   * Redeem a verification token.
+   *
+   * Unlike a reset this leaves sessions alone — confirming an address is
+   * not evidence that anything leaked.
+   */
+  async verifyEmail(params: { token: string }): Promise<{ userId: string }> {
+    const res = await this.http.request<{ user_id: string }>({
+      method: 'POST',
+      path: '/v1/auth/email/verify/confirm',
+      body: { token: params.token },
+    });
+    return { userId: res.user_id };
+  }
+
+  /**
+   * The current session and the caller's profile.
+   *
+   * Includes `emailVerifiedAt`, so this is how an application gates
+   * features on a confirmed address.
+   */
   async me(): Promise<Claims> {
     const res = await this.http.request<{
       user_id: string;
@@ -188,6 +252,9 @@ class AuthApi {
       last_lng: number;
       issued_at: number;
       expires_at: number;
+      email: string;
+      email_verified_at: number | null;
+      created_at: number;
     }>({
       method: 'GET',
       path: '/v1/auth/me',
@@ -200,6 +267,12 @@ class AuthApi {
       lastLng: res.last_lng,
       issuedAt: res.issued_at,
       expiresAt: res.expires_at,
+      email: res.email,
+      // `?? null` rather than trusting the field to be present: an older
+      // gateway omits it entirely, and `undefined` would defeat the
+      // `!== null` check the docs tell people to write.
+      emailVerifiedAt: res.email_verified_at ?? null,
+      createdAt: res.created_at,
     };
   }
 }

@@ -40,6 +40,16 @@ export interface Claims {
   lastLng: number;
   issuedAt: number;
   expiresAt: number;
+  email: string;
+  /**
+   * Unix seconds, or `null` when the address has never been confirmed.
+   *
+   * A timestamp rather than a boolean because "when" is the question
+   * support conversations actually ask. Gate features on
+   * `emailVerifiedAt !== null`.
+   */
+  emailVerifiedAt: number | null;
+  createdAt: number;
 }
 
 // --- geo --------------------------------------------------------------------

@@ -201,6 +201,105 @@ describe('geo', () => {
   });
 });
 
+describe('password reset and verification', () => {
+  test('reset request sends only the email and needs no token', async () => {
+    reset();
+    responses.push({ status: 202, body: '{"accepted":true}' });
+    await client().auth.requestPasswordReset({ email: 'a@b.dev' });
+
+    assert.equal(recorded[0]?.url, '/v1/auth/password-reset');
+    assert.deepEqual(JSON.parse(recorded[0]!.body), { email: 'a@b.dev' });
+    assert.equal(recorded[0]?.headers['authorization'], undefined);
+    // The project key still goes: a reset is scoped to one project.
+    assert.equal(recorded[0]?.headers['x-atlas-key'], TEST_PROJECT_KEY);
+  });
+
+  test('a completed reset clears the stored token', async () => {
+    reset();
+    responses.push({ status: 200, body: '{"user_id":"u-1"}' });
+    const c = client({ token: 'still-valid-a-moment-ago' });
+
+    const out = await c.auth.resetPassword({ token: 'f'.repeat(64), newPassword: 'hunter22' });
+
+    assert.equal(out.userId, 'u-1');
+    // The server revoked every session; keeping the token would only
+    // produce confusing 403s on the next call.
+    assert.equal(c.getToken(), undefined);
+    assert.deepEqual(JSON.parse(recorded[0]!.body), {
+      token: 'f'.repeat(64),
+      new_password: 'hunter22',
+    });
+  });
+
+  test('verifying does not clear the token', async () => {
+    reset();
+    responses.push({ status: 200, body: '{"user_id":"u-1"}' });
+    const c = client({ token: 'keep-me' });
+    await c.auth.verifyEmail({ token: 'a'.repeat(64) });
+    assert.equal(c.getToken(), 'keep-me');
+  });
+
+  test('me() reports verification state, with null for unverified', async () => {
+    reset();
+    responses.push({
+      status: 200,
+      body: JSON.stringify({
+        user_id: 'u-1',
+        session_id: 's-1',
+        last_lat: 0,
+        last_lng: 0,
+        issued_at: 1,
+        expires_at: 2,
+        email: 'a@b.dev',
+        email_verified_at: null,
+        created_at: 1,
+      }),
+    });
+    const unverified = await client({ token: 't' }).auth.me();
+    assert.equal(unverified.emailVerifiedAt, null);
+    assert.equal(unverified.email, 'a@b.dev');
+
+    reset();
+    responses.push({
+      status: 200,
+      body: JSON.stringify({
+        user_id: 'u-1',
+        session_id: 's-1',
+        last_lat: 0,
+        last_lng: 0,
+        issued_at: 1,
+        expires_at: 2,
+        email: 'a@b.dev',
+        email_verified_at: 1787000000,
+        created_at: 1,
+      }),
+    });
+    const verified = await client({ token: 't' }).auth.me();
+    assert.equal(verified.emailVerifiedAt, 1787000000);
+  });
+
+  test('a gateway that omits the field yields null, not undefined', async () => {
+    // An older gateway has no email_verified_at at all. `undefined` would
+    // defeat the `!== null` check the docs tell people to write.
+    reset();
+    responses.push({
+      status: 200,
+      body: JSON.stringify({
+        user_id: 'u-1',
+        session_id: 's-1',
+        last_lat: 0,
+        last_lng: 0,
+        issued_at: 1,
+        expires_at: 2,
+        email: 'a@b.dev',
+        created_at: 1,
+      }),
+    });
+    const out = await client({ token: 't' }).auth.me();
+    assert.strictEqual(out.emailVerifiedAt, null);
+  });
+});
+
 describe('safety votes', () => {
   test('casts a vote and maps the response', async () => {
     reset();

@@ -397,10 +397,19 @@ would accept reset requests and silently drop them, which a user
 experiences as "the email never arrived" and an operator sees as nothing
 at all.
 
-**Known gap:** `GET /v1/auth/me` does not yet report verification status,
-so an application cannot currently gate features on it. The state is
-recorded on `auth.users.email_verified_at`; surfacing it needs a user
-lookup that `ValidateToken`'s cache does not currently do.
+`GET /v1/auth/me` reports `email_verified_at` — a nullable timestamp
+rather than a boolean, because "when" is the question support
+conversations actually ask, and a boolean cannot be widened into one later
+without having already lost the answer. Gate features on it being
+non-null.
+
+That costs `/me` a second round trip, and the split is deliberate. Token
+claims are fixed at issue and cached for 30 seconds; a profile *changes*
+while a token is live, and verifying an address is exactly such a change.
+Folding the profile into the cached claims would show a stale
+"unverified" for up to half a minute to the one person guaranteed to be
+looking — the user who just clicked the link. `/me` is called when an app
+opens, not per location ping.
 
 ## Safety scores
 

@@ -18,8 +18,8 @@ use tonic::Request;
 use crate::error::ApiError;
 use crate::extract::AuthUser;
 use crate::pb::auth::{
-    AuthRequest, RegisterRequest, RequestEmailVerificationRequest, RequestPasswordResetRequest,
-    ResetPasswordRequest, RevokeTokenRequest, VerifyEmailRequest,
+    AuthRequest, GetUserRequest, RegisterRequest, RequestEmailVerificationRequest,
+    RequestPasswordResetRequest, ResetPasswordRequest, RevokeTokenRequest, VerifyEmailRequest,
 };
 use crate::state::AppState;
 use crate::tenant::Tenant;
@@ -180,19 +180,56 @@ pub struct MeOut {
     pub last_lng: f64,
     pub issued_at: i64,
     pub expires_at: i64,
+    pub email: String,
+    /// Unix seconds, or `null` when the address has never been confirmed.
+    ///
+    /// A nullable timestamp rather than a boolean because "when" is the
+    /// question asked in every support conversation, and a boolean cannot
+    /// be widened into one later without having already lost the answer.
+    pub email_verified_at: Option<i64>,
+    pub created_at: i64,
 }
 
-/// Echo the validated claims. Useful for SDK session bootstrapping and
-/// for confirming a token is still live without a mutating call.
-async fn me(user: AuthUser) -> Json<MeOut> {
-    Json(MeOut {
+/// The caller's session and profile.
+///
+/// # Why this costs two round trips
+///
+/// The claims come from `ValidateToken`, which is served from a 30s cache;
+/// the profile comes from `GetUser`, which is not cached. They are
+/// separate calls because they have different lifetimes: claims are fixed
+/// at issue, while a profile CHANGES while a token is live — verifying an
+/// address is exactly such a change. Folding the profile into the cached
+/// claims would show a stale "unverified" for up to 30 seconds to the one
+/// user guaranteed to be looking: the one who just clicked the link.
+///
+/// This is not a hot path. It is called when an app opens, not per
+/// location ping.
+async fn me(State(state): State<AppState>, user: AuthUser) -> Result<Json<MeOut>, ApiError> {
+    let profile = state
+        .auth
+        .clone()
+        .get_user(Request::new(GetUserRequest {
+            user_id: user.user_id.clone(),
+            project_id: user.project_id.clone(),
+        }))
+        .await
+        .map_err(|s| ApiError::upstream("auth", s))?
+        .into_inner();
+
+    Ok(Json(MeOut {
         user_id: user.user_id,
         session_id: user.session_id,
         last_lat: user.last_lat,
         last_lng: user.last_lng,
         issued_at: user.issued_at,
         expires_at: user.expires_at,
-    })
+        email: profile.email,
+        // The proto carries 0 for "never verified"; the JSON carries null,
+        // because 0 is a real timestamp and a client doing date maths on
+        // it would render 1970.
+        email_verified_at: (profile.email_verified_at != 0).then_some(profile.email_verified_at),
+        created_at: profile.created_at,
+    }))
 }
 
 // --- password reset ---------------------------------------------------------

@@ -152,6 +152,16 @@ class AuthService(
         }
     }
 
+    /**
+     * Look up one user's current state.
+     *
+     * Scoped, so a user id from another project resolves to nothing rather
+     * than to that project's user — the same rule every other lookup
+     * follows.
+     */
+    fun getUser(projectId: UUID, userId: UUID): User =
+        users.findById(projectId, userId) ?: throw AuthError.InvalidCredentials()
+
     // --- password reset ---------------------------------------------------
 
     /**
