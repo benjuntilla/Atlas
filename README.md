@@ -436,6 +436,39 @@ not change what another customer's users are told about it.
 rather than materialised — and stays in `events.proto` as the topic a
 future caching pass would use.
 
+## Alerting
+
+`infra/k8s/base/monitoring/alerts.yaml` holds 11 Prometheus rules. Atlas
+exported a lot of metrics and, until these, alerted on none of them — a
+dashboard nobody is looking at during an incident is not monitoring.
+
+Three rules the design turns on:
+
+* **`AtlasOutboxNotDraining`** watches the AGE of the oldest pending
+  outbox row, not the count. A big backlog that is draining is a busy
+  system; a small one that is not draining is a broken one, and only age
+  tells them apart. It alerts on a gauge rather than on
+  `outbox_dispatched_total`, because that counter simply *stops* when
+  Kafka is unreachable — and a counter that stops looks exactly like a
+  system with nothing to do.
+* **`AtlasTenantMismatchSpike`** fires on tokens presented with the wrong
+  project key. That is either a broken integration or somebody probing the
+  boundary, and both deserve a human.
+* **`AtlasPasswordResetsNotCompleting`** catches reset links that are
+  requested but never redeemed — the signature of email failing silently,
+  where nothing errors anywhere.
+
+Every expression references a metric the services actually emit, and
+`scripts/check-alert-metrics.py` enforces that in CI. An alert on a
+misspelled metric never fires and never fires *silently*: Prometheus
+treats a nonexistent series as empty, which is indistinguishable from
+healthy, so you find out during the incident the rule was written to
+catch. The YAML looks equally correct either way, which is exactly why a
+reviewer cannot catch it.
+
+Every rule carries a non-zero `for:`. All of these can spike briefly
+during a deploy, and a channel that cries wolf gets muted.
+
 ## Rate limiting
 
 The gateway and control plane both limit requests in-process. Credential

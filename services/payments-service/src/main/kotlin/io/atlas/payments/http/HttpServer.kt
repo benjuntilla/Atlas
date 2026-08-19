@@ -1,6 +1,7 @@
 package io.atlas.payments.http
 
 import io.atlas.payments.core.PaymentProvider
+import io.atlas.payments.core.OutboxBackend
 import io.atlas.payments.core.PaymentsMetrics
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -79,6 +80,32 @@ fun newPrometheusRegistry(): PrometheusMeterRegistry =
     PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
 
 /** Micrometer-backed [PaymentsMetrics] exposed via /metrics. */
+/**
+ * Register outbox depth as GAUGES fed by a supplier.
+ *
+ * Gauges rather than counters because the question is "how much is stuck
+ * right now", and Micrometer polls the supplier at scrape time so the
+ * value is never stale.
+ *
+ * This is the signal payments actually needs. `outbox_dispatched_total`
+ * is a counter of SUCCESSES: when Kafka is unreachable it simply stops
+ * increasing, and a counter that stops looks exactly like a system with
+ * nothing to do. Depth goes UP when the drain is stuck, which is a
+ * statement rather than an absence.
+ *
+ * Two series, because they answer different questions: row count says how
+ * much is waiting, and the age of the oldest row distinguishes "busy"
+ * from "wedged" — a large backlog that is draining has a young head.
+ */
+fun registerOutboxGauges(registry: MeterRegistry, backend: OutboxBackend) {
+    registry.gauge("atlas_payments_outbox_pending_rows", backend) {
+        it.pending().rows.toDouble()
+    }
+    registry.gauge("atlas_payments_outbox_oldest_age_seconds", backend) {
+        it.pending().oldestAgeSeconds.toDouble()
+    }
+}
+
 class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
     private val initiated = registry.counter("atlas_payments_transactions_initiated_total")
     private val settled = registry.counter("atlas_payments_transactions_settled_total")

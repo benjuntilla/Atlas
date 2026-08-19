@@ -1,0 +1,231 @@
+# Prometheus alert rules.
+#
+# Atlas exports a lot of metrics and, until this file, alerted on none of
+# them. A dashboard nobody is looking at during an incident is not
+# monitoring; these are the conditions worth waking somebody for.
+#
+# # Rules these follow
+#
+# Every expression references a metric this repository actually emits.
+# An alert on a misspelled or aspirational metric never fires, and it
+# never fires SILENTLY — you find out during the incident it was meant to
+# catch. Grep for each name in services/ and consumers/ before adding one.
+#
+# Alerts are on symptoms users feel, not on causes. "The outbox is not
+# draining" is worth paging for because money stops moving; "Kafka broker
+# 2 is down" is not, because the system may be fine without it.
+#
+# `for:` is never zero. Every one of these can spike briefly during a
+# deploy or a leader election, and a rule that fires on a single scrape
+# trains people to ignore the channel — which is worse than not alerting.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: atlas-alerts
+  namespace: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+    # The Prometheus Operator selects rules by label; without a matching
+    # ruleSelector on the Prometheus resource this object is inert.
+    prometheus: main
+spec:
+  groups:
+    # --- money ------------------------------------------------------------
+    - name: atlas.payments
+      rules:
+        # The outbox is the only path from a committed transaction to the
+        # rest of the system. If it stops draining, settlements and refunds
+        # stop happening while the API keeps accepting them — the failure
+        # is invisible from the outside until someone asks where their
+        # money went.
+        #
+        # This alerts on the AGE of the oldest pending row rather than the
+        # count. A big backlog that is draining is a busy system; a small
+        # one that is not draining is a broken system, and only age tells
+        # them apart.
+        - alert: AtlasOutboxNotDraining
+          expr: atlas_payments_outbox_oldest_age_seconds > 300
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Payments outbox has rows older than 5 minutes"
+            description: >-
+              The oldest undispatched outbox row is
+              {{ $value | humanizeDuration }} old. Settlements and refunds
+              are not reaching Kafka. Usually the broker is unreachable —
+              check atlas_kafka_produce_errors_total and the dispatcher
+              logs. Rows are safe in Postgres and will drain when it
+              recovers; nothing is lost, but nothing is settling either.
+
+        # Depth without age: catches the case where rows are draining but
+        # arriving faster than they leave.
+        - alert: AtlasOutboxBacklogGrowing
+          expr: atlas_payments_outbox_pending_rows > 1000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Payments outbox backlog above 1000 rows"
+            description: >-
+              {{ $value }} rows pending. If the age alert is quiet the
+              dispatcher is keeping up but only just; consider raising the
+              batch size or adding a replica.
+
+        # fare-consumer holds its Kafka offset when payments is
+        # unreachable, which is correct — but a sustained hold means
+        # settlement has stalled behind it.
+        - alert: AtlasFareConsumerRetrying
+          expr: rate(atlas_fare_retried_total[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "fare-consumer has been retrying for 10 minutes"
+            description: >-
+              The consumer is not committing offsets, so settlement is
+              stalled. Check payments-service availability.
+
+    # --- the front door ---------------------------------------------------
+    - name: atlas.gateway
+      rules:
+        # 5% of requests failing is well past "some clients are having a
+        # bad time". The ratio is over total requests rather than a raw
+        # error count so it means the same thing at 10 rps and 10k.
+        - alert: AtlasGatewayErrorRate
+          expr: |
+            sum(rate(atlas_gateway_errors_total[5m]))
+              / clamp_min(sum(rate(atlas_gateway_requests_total[5m])), 0.001)
+              > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gateway error rate above 5%"
+            description: >-
+              {{ $value | humanizePercentage }} of requests are failing.
+              Check whether one upstream is down: the gateway returns 503
+              per-request when a backend is unreachable, so this often
+              means auth, geo, or payments rather than the gateway itself.
+
+        # Tenant mismatches are not a normal client error. A token from one
+        # project presented with another project's key is either a broken
+        # integration or somebody probing the boundary, and both are worth
+        # a human look. The threshold is deliberately low.
+        - alert: AtlasTenantMismatchSpike
+          expr: rate(atlas_gateway_tenant_mismatch_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Tokens being presented with the wrong project key"
+            description: >-
+              {{ $value }}/s requests are failing the token-to-project
+              check. A single customer's misconfiguration looks like this,
+              and so does credential stuffing across tenants. The gateway
+              logs the key prefix and both project ids.
+
+        # The project cache is what keeps key resolution off the database.
+        # A collapsed hit rate means every request is now a Postgres query.
+        - alert: AtlasProjectCacheMissRate
+          expr: |
+            sum(rate(atlas_gateway_project_cache_total{result="miss"}[10m]))
+              / clamp_min(sum(rate(atlas_gateway_project_cache_total[10m])), 0.001)
+              > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Project key cache missing more than half the time"
+            description: >-
+              Every miss is a database round trip on the request path. A
+              flood of invalid keys looks like this — the negative cache
+              should absorb repeats, so a sustained miss rate means the
+              keys are all DIFFERENT, which is a scan.
+
+    # --- identity ---------------------------------------------------------
+    - name: atlas.auth
+      rules:
+        - alert: AtlasAuthFailureRate
+          expr: |
+            sum(rate(atlas_auth_authentications_total{outcome="failure"}[5m]))
+              / clamp_min(sum(rate(atlas_auth_authentications_total[5m])), 0.001)
+              > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than half of logins are failing"
+            description: >-
+              Normal for a service under credential stuffing, and also
+              normal if a customer shipped a broken login form. The
+              `reason` label separates invalid_credentials from the rest.
+
+        # Reset links that are requested but never redeemed mean the mail
+        # is not arriving. Nothing errors in that case — which is exactly
+        # why it needs an alert rather than a log line.
+        - alert: AtlasPasswordResetsNotCompleting
+          expr: |
+            sum(rate(atlas_auth_password_resets_requested_total[1h])) > 0.01
+            and
+            sum(rate(atlas_auth_password_resets_completed_total[1h])) == 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Password resets requested but none completed in an hour"
+            description: >-
+              Users are asking for reset links and nobody is redeeming one.
+              The usual cause is email delivery failing silently. Check the
+              provider; if none is configured the endpoints return 422 and
+              this will not fire.
+
+    # --- data plane -------------------------------------------------------
+    - name: atlas.consumers
+      rules:
+        # Consumer lag, measured as the age of the events being processed
+        # rather than as a Kafka offset delta. It is the number that maps
+        # to a user's experience: a geofence alert arriving four minutes
+        # after someone crossed the fence is useless whatever the offset
+        # lag says.
+        - alert: AtlasLocationIngestLag
+          expr: histogram_quantile(0.95, rate(atlas_location_ingest_lag_seconds_bucket[5m])) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Location events are more than a minute behind"
+            description: >-
+              p95 ingest lag is {{ $value | humanizeDuration }}. Geofence
+              alerts and nearby results are stale by that much.
+
+        - alert: AtlasConsumerErrors
+          expr: |
+            sum by (job) (
+              rate(atlas_location_consumer_errors_total[5m])
+              or rate(atlas_safety_consumer_errors_total[5m])
+            ) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A consumer is erroring steadily"
+            description: >-
+              {{ $value }}/s errors on {{ $labels.job }}. The `kind` label
+              separates malformed records (which are skipped and committed)
+              from faults that hold the offset.
+
+        # Kafka produce failures on the geo side mean location updates are
+        # persisted but never fan out — the row is in Postgres, and the
+        # geofence alert never happens.
+        - alert: AtlasKafkaProduceErrors
+          expr: rate(atlas_kafka_produce_errors_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Events are failing to publish to Kafka"
+            description: >-
+              Location writes still succeed — the enqueue is
+              fire-and-forget by design — so this failure is invisible to
+              callers while downstream consumers see nothing.

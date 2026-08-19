@@ -19,6 +19,12 @@ resources:
   - autoscaling.yaml
   - network-policy.yaml
   - ingress.yaml
+  # PrometheusRule is a CRD from the Prometheus Operator. Applying it to a
+  # cluster without that operator installed fails with "no matches for
+  # kind"; the alerts are still worth keeping in the repo, because a rule
+  # file that lives in a monitoring team's separate config drifts from the
+  # metric names it references within a release or two.
+  - monitoring/alerts.yaml
 
 # `labels` rather than the deprecated `commonLabels`. includeSelectors is
 # false on purpose: adding a label to every Deployment's selector would

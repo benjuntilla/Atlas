@@ -13,6 +13,7 @@ import io.atlas.payments.grpc.HealthCheck
 import io.atlas.payments.grpc.PaymentsGrpcService
 import io.atlas.payments.http.MicrometerPaymentsMetrics
 import io.atlas.payments.http.newPrometheusRegistry
+import io.atlas.payments.http.registerOutboxGauges
 import io.atlas.payments.http.startHttpServer
 import io.atlas.payments.kafka.FareEventProducer
 import io.atlas.payments.outbox.OutboxDispatcher
@@ -71,8 +72,13 @@ fun main() {
     )
 
     val publisher = FareEventProducer.build(config.kafkaBrokers)
+    val outboxBackend = ExposedOutboxBackend()
+    // Scraped, not pushed: a stuck outbox is money not moving, and the
+    // gauge is what makes that visible without anyone querying the table.
+    registerOutboxGauges(registry, outboxBackend)
+
     val dispatcher = OutboxDispatcher(
-        backend = ExposedOutboxBackend(),
+        backend = outboxBackend,
         publisher = publisher,
         pollInterval = Duration.ofSeconds(config.outboxPollSeconds),
         batchSize = config.outboxBatchSize,

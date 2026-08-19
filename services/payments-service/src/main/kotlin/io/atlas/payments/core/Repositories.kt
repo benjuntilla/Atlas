@@ -82,7 +82,22 @@ interface OutboxStore {
  */
 interface OutboxBackend {
     fun drain(limit: Int, publish: (OutboxRow) -> Unit): Int
+
+    /**
+     * How many rows are still waiting, and how old the oldest one is in
+     * seconds (0 when there are none).
+     *
+     * This is the signal that matters for payments. `outboxDispatched` is
+     * a counter of SUCCESSES: when Kafka is unreachable it simply stops
+     * increasing, and a counter that stops is indistinguishable from a
+     * system with nothing to do. Depth and age go UP when the drain is
+     * stuck, which is a statement rather than an absence — and a stuck
+     * outbox means settlements and refunds are not happening.
+     */
+    fun pending(): OutboxDepth
 }
+
+data class OutboxDepth(val rows: Long, val oldestAgeSeconds: Long)
 
 /**
  * Runs a block inside a single database transaction so a group of repository

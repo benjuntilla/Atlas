@@ -210,8 +210,23 @@ jobs:
           for overlay in dev prod; do
             echo "--- $overlay"
             kustomize build "infra/k8s/overlays/$overlay" > "/tmp/$overlay.yaml"
-            kubeconform -strict -summary -kubernetes-version 1.29.0 "/tmp/$overlay.yaml"
+            # The second -schema-location covers CRDs: PrometheusRule is not
+            # a core Kubernetes kind, and without it kubeconform -strict
+            # rejects the alert rules as an unknown type. Keeping -strict
+            # matters more than the convenience of -ignore-missing-schemas,
+            # which would also silence typos in the core objects.
+            kubeconform -strict -summary -kubernetes-version 1.29.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              "/tmp/$overlay.yaml"
           done
+
+      # An alert on a metric nothing emits never fires, and never fires
+      # silently — you find out during the incident it was meant to catch.
+      # The YAML looks equally correct either way, so this cannot be caught
+      # by review.
+      - name: Alert rules must reference real metrics
+        run: python3 scripts/check-alert-metrics.py
 
       # The secret template holds placeholder values. If it ever ends up in
       # the kustomization, `kubectl apply` would create a Secret whose

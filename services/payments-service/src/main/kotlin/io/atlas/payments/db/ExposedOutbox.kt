@@ -1,6 +1,7 @@
 package io.atlas.payments.db
 
 import io.atlas.payments.core.OutboxBackend
+import io.atlas.payments.core.OutboxDepth
 import io.atlas.payments.core.OutboxRow
 import io.atlas.payments.core.OutboxStore
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
@@ -40,6 +41,35 @@ class ExposedOutboxStore : OutboxStore {
  * table concurrently without double-publishing or blocking each other.
  */
 class ExposedOutboxBackend : OutboxBackend {
+    /**
+     * Raw SQL rather than Exposed's DSL: `EXTRACT(EPOCH FROM ...)` over
+     * the oldest row has no clean DSL spelling, and one statement is
+     * cheaper than a count plus a min.
+     *
+     * `dispatched_at IS NULL` is the pending predicate — the same one the
+     * partial index in migration 0031 covers, so this stays an index scan
+     * rather than a table scan as the outbox grows.
+     */
+    override fun pending(): OutboxDepth = transaction {
+        exec(
+            """
+            SELECT COUNT(*)::bigint AS rows,
+                   COALESCE(
+                       EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint,
+                       0
+                   ) AS oldest_age_seconds
+            FROM payments.outbox
+            WHERE dispatched_at IS NULL
+            """,
+        ) { rs ->
+            if (rs.next()) {
+                OutboxDepth(rs.getLong("rows"), rs.getLong("oldest_age_seconds"))
+            } else {
+                OutboxDepth(0, 0)
+            }
+        } ?: OutboxDepth(0, 0)
+    }
+
     override fun drain(limit: Int, publish: (OutboxRow) -> Unit): Int = transaction {
         val pending = claimPending(limit)
         var dispatched = 0

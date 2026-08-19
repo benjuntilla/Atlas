@@ -2,6 +2,7 @@ package io.atlas.payments.fakes
 
 import io.atlas.payments.core.DuplicateIdempotencyKey
 import io.atlas.payments.core.OutboxBackend
+import io.atlas.payments.core.OutboxDepth
 import io.atlas.payments.core.OutboxRow
 import io.atlas.payments.core.OutboxStore
 import io.atlas.payments.core.TransactionRepository
@@ -151,6 +152,14 @@ class InMemoryOutbox : OutboxStore, OutboxBackend {
         }
         return count
     }
+
+    /**
+     * The port's depth query. Age is always 0 here: this fake has no
+     * clock and the tests that use it assert on the count, so inventing
+     * timestamps would add a moving part without adding a guarantee.
+     */
+    @Synchronized
+    override fun pending(): OutboxDepth = OutboxDepth(pendingCount().toLong(), 0)
 
     @Synchronized
     fun pendingCount(): Int = rows.count { it.id !in dispatched }
