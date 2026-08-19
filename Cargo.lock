@@ -284,6 +284,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-sdk"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

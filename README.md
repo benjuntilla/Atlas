@@ -588,7 +588,31 @@ client-supplied, and trusting its first entry lets anyone mint a fresh
 bucket per forged value. Behind a proxy, set it to the number of proxies
 you actually run — the Kubernetes manifests set `1` for ingress-nginx.
 
-## SDK
+## SDKs
+
+Three, covering the same surface:
+
+| | Package | Runtime dependencies |
+|---|---|---|
+| TypeScript | `sdks/typescript` | none — platform `fetch` |
+| Rust | `sdks/rust` | `reqwest` + `rustls`, no system TLS |
+| Dart | `sdks/dart` | none — `dart:io` |
+
+`scripts/check-sdk-coverage.py` fails CI if any of them lags the gateway.
+An SDK that silently misses an endpoint looks finished, so nobody notices
+until a user reaches for a raw HTTP client instead.
+
+All three share the same decisions: the project key is required at
+construction (a missing one is a configuration mistake, not a 401 on every
+call), `Debug`/`toString` redacts credentials, and only idempotent
+requests are retried — plus deposits and transactions, which carry an
+idempotency key that is *reused across attempts*, because a fresh key per
+retry would double-charge.
+
+**The Dart SDK carries an extra warning**, because shipping it inside a
+Flutter app is the obvious thing to do and would put a project key —
+which can read every user and move money — into a binary anyone can
+extract it from. Put it behind your own API.
 
 `sdks/typescript` wraps the HTTP API above. No runtime dependencies — it
 uses the platform `fetch`.

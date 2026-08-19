@@ -21,6 +21,10 @@ members = [
     "services/control-plane",
     # Phase 8 — production operations
     "tools/migrator",
+    # SDKs. A workspace member so `cargo test --workspace` and the
+    # workspace lints cover it: an SDK excluded from CI is one that
+    # compiles until the day somebody needs it.
+    "sdks/rust",
 ]
 
 # Shared dependency versions. Member crates inherit via `workspace = true`.

@@ -1,0 +1,17 @@
+name: atlas_sdk
+description: Dart client for the Atlas platform - auth, geo, and payments.
+version: 0.1.0
+repository: https://github.com/Nairinn/Atlas
+
+environment:
+  sdk: ^3.0.0
+
+# No runtime dependencies. dart:io's HttpClient covers everything this
+# needs, and a package that pulls in `http` forces that version choice on
+# every Flutter app that adopts it — the kind of constraint an SDK should
+# not impose to save itself fifty lines.
+dependencies:
+
+dev_dependencies:
+  lints: ^4.0.0
+  test: ^1.24.0
