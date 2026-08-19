@@ -210,6 +210,14 @@ speaks gRPC on a private network.
 | POST | `/v1/payments/transactions` | required | Bearer | `payments.InitiateTransaction` |
 | GET | `/healthz`, `/readyz` | — | — | — |
 
+The full contract is in [`docs/openapi.yaml`](docs/openapi.yaml) — 21
+operations with schemas, error codes, and the reasoning behind the odd
+ones (why reset requests always answer 202, why deleting someone else's
+geofence is a 404). `scripts/check-openapi-routes.py` compares it against
+the axum routers in CI, in both directions, so it cannot quietly drift:
+an operation the gateway serves but the spec omits fails, and so does one
+the spec invents.
+
 Errors use one envelope, with a stable `code` for SDKs to branch on:
 
 ```json

@@ -1,0 +1,840 @@
+# OpenAPI description of the Atlas gateway.
+#
+# `scripts/check-openapi-routes.py` compares the paths and methods here
+# against the axum routers in services/gateway/src/routes and fails CI if
+# they disagree. A spec that has drifted is worse than no spec: it is a
+# document people trust and generate clients from, and drift is invisible
+# at review time — nothing in a router diff reminds you that a YAML file
+# two directories away describes the same surface.
+#
+# The router is the source of truth. This file keeps up with it.
+openapi: 3.1.0
+
+info:
+  title: Atlas
+  version: "1.0.0"
+  summary: Auth, geospatial queries, and payments for location-aware apps.
+  description: |
+    Every `/v1` request carries **two independent credentials**, and
+    conflating them is the mistake worth avoiding:
+
+    | Header | Answers | Comes from |
+    |---|---|---|
+    | `X-Atlas-Key` | which application is calling | `atlas keys create` |
+    | `Authorization: Bearer` | which of your users is calling | `POST /v1/auth/login` |
+
+    Neither substitutes for the other, and the project key is required
+    even on register and login — creating a user means creating them in a
+    project. The project key is a **server-side secret**: anyone holding
+    it can act on your whole project, so it must not ship in a browser
+    bundle or a mobile app.
+
+    A token is bound to the project that issued it. Presenting one
+    alongside a different project's key is a 401.
+
+    **No request body has a `user_id` or `project_id` field.** Both are
+    injected by the gateway from the credentials above, so a caller can
+    name neither — it can only present credentials that name them.
+
+servers:
+  - url: https://api.atlas.dev
+    description: Production
+  - url: http://localhost:8080
+    description: docker-compose
+
+security:
+  - projectKey: []
+    bearerAuth: []
+
+tags:
+  - name: auth
+    description: Accounts, sessions, password reset, email verification.
+  - name: geo
+    description: Locations, proximity search, geofences, safety votes.
+  - name: payments
+    description: Wallets, deposits, transfers.
+  - name: ops
+    description: Health probes. No credentials.
+
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Liveness
+      description: |
+        Takes no credentials. A liveness probe that returned 401 would have
+        Kubernetes restart every pod.
+      security: []
+      responses:
+        "200":
+          description: The process is running.
+
+  /readyz:
+    get:
+      tags: [ops]
+      summary: Readiness
+      description: |
+        Asserts only that this replica can route HTTP. It deliberately does
+        NOT check upstreams: a backend outage would otherwise pull every
+        gateway replica out of service, turning a partial failure into a
+        total one. Individual requests return 503 instead.
+      security: []
+      responses:
+        "200":
+          description: This replica can serve requests.
+
+  /v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Create a user in the calling project
+      description: |
+        The same address in two projects is two different people, so this
+        conflicts only within one project.
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Credentials" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id]
+                properties:
+                  user_id: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: That address already has an account in this project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange credentials for a token
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Credentials"
+                - type: object
+                  properties:
+                    lat:
+                      type: number
+                      description: Optional position stamped into the token's claims.
+                    lng: { type: number }
+      responses:
+        "200":
+          description: A signed token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: |
+            Wrong password, no such user, or a user in a different project.
+            Deliberately one answer for all three.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session
+      responses:
+        "200":
+          description: Revoked, or the token was already invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/me:
+    get:
+      tags: [auth]
+      summary: The current session and the caller's profile
+      responses:
+        "200":
+          description: Claims plus profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The session was revoked, e.g. by a password reset.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/auth/password-reset:
+    post:
+      tags: [auth]
+      summary: Mail a password reset link
+      description: |
+        **Answers 202 whether or not the address has an account**, and
+        takes the same path internally. An endpoint that distinguished
+        them would be an account enumeration oracle, and the addresses it
+        confirmed would be exactly the ones worth attacking. Do not build
+        a UI that claims the address was found.
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "422": { $ref: "#/components/responses/EmailNotConfigured" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/password-reset/confirm:
+    post:
+      tags: [auth]
+      summary: Redeem a reset token and set a new password
+      description: |
+        Needs no bearer token: whoever holds the emailed token is, for this
+        one call, the account's owner. The token names its own project.
+
+        Succeeding **revokes every session** the user had, immediately —
+        including cached validations. A reset is a statement that the old
+        credential may be compromised, so a session established with it
+        must not survive.
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: { type: string }
+                new_password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        "200":
+          description: Password changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: |
+            Unknown, expired, already used, or a token of the wrong kind.
+            One answer for all four: distinguishing them would tell a
+            holder of a guessed token which guesses are getting warmer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/EmailNotConfigured" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/email/verify:
+    post:
+      tags: [auth]
+      summary: Mail an email verification link
+      description: Silent about existence, like the reset request.
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { $ref: "#/components/responses/Accepted" }
+        "422": { $ref: "#/components/responses/EmailNotConfigured" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/email/verify/confirm:
+    post:
+      tags: [auth]
+      summary: Redeem a verification token
+      description: |
+        Does **not** revoke sessions — confirming an address is not
+        evidence that anything leaked.
+      security:
+        - projectKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: Address confirmed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Unknown, expired, used, or a token of the wrong kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/EmailNotConfigured" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/geo/locations:
+    post:
+      tags: [geo]
+      summary: Record the caller's position
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng]
+              properties:
+                lat: { type: number, minimum: -90, maximum: 90 }
+                lng: { type: number, minimum: -180, maximum: 180 }
+                recorded_at:
+                  type: integer
+                  format: int64
+                  description: Unix seconds. Omit or send 0 for "now".
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/nearby:
+    get:
+      tags: [geo]
+      summary: Users near a point
+      description: |
+        Scoped to the calling project: it never returns another customer's
+        users, even standing on the same coordinates.
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number } }
+        - { name: lng, in: query, required: true, schema: { type: number } }
+        - name: radius_m
+          in: query
+          required: true
+          schema: { type: number, exclusiveMinimum: 0, maximum: 50000 }
+        - name: role
+          in: query
+          schema: { type: string }
+          description: Free-form application-defined filter.
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Nearest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/NearbyUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/routes/score:
+    post:
+      tags: [geo]
+      summary: Rank route candidates by safety
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidates]
+              properties:
+                candidates:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [route_id, points]
+                    properties:
+                      route_id: { type: string }
+                      points:
+                        type: array
+                        minItems: 2
+                        items:
+                          type: object
+                          required: [lat, lng]
+                          properties:
+                            lat: { type: number }
+                            lng: { type: number }
+      responses:
+        "200":
+          description: |
+            The best candidate and every score. With no votes along any
+            route every score is the neutral 1500 and `best_route_id` is
+            simply the first candidate.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  best_route_id: { type: string }
+                  score: { type: number }
+                  all_scores:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        route_id: { type: string }
+                        score: { type: number }
+                        vote_count: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/geofences:
+    get:
+      tags: [geo]
+      summary: The caller's geofences
+      parameters:
+        - name: active_only
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  geofences:
+                    type: array
+                    items: { $ref: "#/components/schemas/Geofence" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [geo]
+      summary: Create a geofence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [center_lat, center_lng, radius_m]
+              properties:
+                label: { type: string }
+                center_lat: { type: number }
+                center_lng: { type: number }
+                radius_m: { type: number, exclusiveMinimum: 0, maximum: 50000 }
+      responses:
+        "200":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Geofence" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/geofences/{id}:
+    delete:
+      tags: [geo]
+      summary: Deactivate one of the caller's geofences
+      description: |
+        Soft delete. A fence belonging to somebody else returns 404, the
+        same answer as an id that never existed — anything else would
+        confirm the id is real. Deleting your own fence twice stays
+        idempotent.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such fence, or not yours.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/geofences/check:
+    post:
+      tags: [geo]
+      summary: Which of the caller's geofences contain a point
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng]
+              properties:
+                lat: { type: number }
+                lng: { type: number }
+      responses:
+        "200":
+          description: Matching fences.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggered: { type: boolean }
+                  geofence_ids:
+                    type: array
+                    items: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/geo/safety/votes:
+    post:
+      tags: [geo]
+      summary: Record a safety judgement about a place
+      description: |
+        Attributed to the token's user. Voting again in the same area
+        replaces your previous verdict rather than adding to it: opinions
+        change, and one user is one voter however often they vote.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng, verdict]
+              properties:
+                lat: { type: number }
+                lng: { type: number }
+                verdict:
+                  type: string
+                  enum: [safe, unsafe]
+      responses:
+        "200":
+          description: The area's score including this vote.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  safety_score: { $ref: "#/components/schemas/SafetyScore" }
+                  vote_count: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/payments/wallet:
+    get:
+      tags: [payments]
+      summary: The caller's wallet balance
+      responses:
+        "200":
+          description: |
+            Balance in minor units. A user with no wallet reads as zero
+            rather than 404 — the wallet is created on first use.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance_cents: { type: integer, format: int64 }
+                  currency: { type: string, example: USD }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/payments/deposits:
+    post:
+      tags: [payments]
+      summary: Add funds to the caller's wallet
+      description: |
+        The only way money enters the platform. Settlement refuses to move
+        funds a wallet does not hold, so wallets start empty and stay
+        honest.
+
+        There is **no real payment processor** behind this yet: the
+        provider is a placeholder that always authorises. No money moves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount_cents]
+              properties:
+                amount_cents: { type: integer, format: int64, exclusiveMinimum: 0 }
+                idempotency_key:
+                  type: string
+                  description: |
+                    Generated for you if omitted. Scoped per project, so
+                    two customers may both use `order-1`.
+      responses:
+        "200":
+          description: Deposited.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id: { type: string, format: uuid }
+                  status: { type: string }
+                  balance_cents: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/payments/transactions:
+    post:
+      tags: [payments]
+      summary: Move funds from the caller to another user
+      description: |
+        Creates a **pending** transaction and emits `RIDE_ACCEPTED`. The
+        money moves later, when the application publishes `RIDE_COMPLETED`
+        or `RIDE_CANCELLED` and fare-consumer settles or refunds.
+
+        There is deliberately no settle or refund endpoint here: the
+        gateway cannot verify that the caller owns a transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_user_id, amount_cents]
+              properties:
+                to_user_id: { type: string, format: uuid }
+                amount_cents: { type: integer, format: int64, exclusiveMinimum: 0 }
+                idempotency_key: { type: string }
+                ride_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Pending transaction created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id: { type: string, format: uuid }
+                  status: { type: string, example: pending }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/IdempotencyConflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+components:
+  securitySchemes:
+    projectKey:
+      type: apiKey
+      in: header
+      name: X-Atlas-Key
+      description: |
+        Your project key, `atl_live_…` / `atl_test_…` / `atl_dev_…`. A
+        server-side secret: anyone holding it can act on your whole
+        project.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: An end-user token from `POST /v1/auth/login`.
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable across releases. Branch on this, not on the message.
+              enum:
+                - invalid_argument
+                - unauthenticated
+                - permission_denied
+                - not_found
+                - already_exists
+                - failed_precondition
+                - rate_limited
+                - unavailable
+                - internal
+            message: { type: string }
+
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 72 }
+
+    Token:
+      type: object
+      properties:
+        token: { type: string }
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix seconds.
+
+    Me:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        last_lat: { type: number }
+        last_lng: { type: number }
+        issued_at: { type: integer, format: int64 }
+        expires_at: { type: integer, format: int64 }
+        email: { type: string, format: email }
+        email_verified_at:
+          type: [integer, "null"]
+          format: int64
+          description: |
+            Unix seconds, or null when the address has never been
+            confirmed. A timestamp rather than a boolean because "when" is
+            what support conversations ask. Gate features on non-null.
+        created_at: { type: integer, format: int64 }
+
+    SafetyScore:
+      type: number
+      minimum: 1000
+      maximum: 2000
+      description: |
+        Bayesian-smoothed balance of safety votes near a point. 1500 is
+        neutral and is also what somewhere unvoted scores. Both bounds are
+        asymptotic — no amount of agreement escapes them.
+
+        Always read with the accompanying vote count: 1500 from no votes
+        and 1500 from a hundred evenly split voters are different facts.
+
+    NearbyUser:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        lat: { type: number }
+        lng: { type: number }
+        distance_m: { type: number }
+        safety_score: { $ref: "#/components/schemas/SafetyScore" }
+        safety_vote_count:
+          type: integer
+          format: int64
+          description: Zero means the score is a default, not a measurement.
+
+    Geofence:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        label: { type: string, description: Empty string when unlabelled. }
+        center_lat: { type: number }
+        center_lng: { type: number }
+        radius_m: { type: number }
+        active: { type: boolean }
+        created_at: { type: integer, format: int64 }
+
+  responses:
+    Accepted:
+      description: |
+        Accepted. Says nothing about whether the address exists — see the
+        operation description.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              accepted: { type: boolean }
+    BadRequest:
+      description: Malformed or out-of-range input.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: |
+        Missing or invalid credentials. Also returned when a token is
+        presented with a key from a different project — the message does
+        not say which half was wrong, since that would confirm the token
+        is otherwise valid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: |
+        Credential endpoints carry a much smaller quota than ordinary
+        traffic, because those are the ones worth brute forcing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    IdempotencyConflict:
+      description: |
+        The key was reused with different arguments. Reusing it with the
+        same arguments returns the original result instead.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    EmailNotConfigured:
+      description: |
+        No email provider is configured, so this flow cannot work. Login
+        and registration are unaffected.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: |
+        An upstream service could not be reached. The gateway fails
+        per-request rather than pulling itself out of service.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

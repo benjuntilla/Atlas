@@ -228,6 +228,21 @@ jobs:
       - name: Alert rules must reference real metrics
         run: python3 scripts/check-alert-metrics.py
 
+      # A spec that has drifted is worse than no spec: people trust it and
+      # generate clients from it. Drift is also invisible at review time —
+      # nothing in a router diff reminds you that docs/openapi.yaml
+      # describes the same surface.
+      - name: OpenAPI spec must match the router
+        run: |
+          pip install --quiet openapi-spec-validator
+          python3 scripts/check-openapi-routes.py
+          python3 -c "
+          from openapi_spec_validator import validate
+          import yaml
+          validate(yaml.safe_load(open('docs/openapi.yaml')))
+          print('openapi spec is valid')
+          "
+
       # The secret template holds placeholder values. If it ever ends up in
       # the kustomization, `kubectl apply` would create a Secret whose
       # contents are the literal string REPLACE_ME, and services would fail
