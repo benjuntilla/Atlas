@@ -411,6 +411,39 @@ Folding the profile into the cached claims would show a stale
 looking — the user who just clicked the link. `/me` is called when an app
 opens, not per location ping.
 
+## Rotating the JWT signing key
+
+A single-secret signer cannot be rotated. Changing the secret invalidates
+every token signed with the old one at the instant of the change, so every
+user is logged out simultaneously — during a deploy, while replicas are
+already restarting, and usually in response to a suspected leak, which is
+the worst possible moment to also take down authentication.
+
+Tokens now carry a `kid` header naming the key that signed them, and
+auth-service verifies against the active key plus any retired ones. That
+makes rotation three independently reversible steps:
+
+| Step | `JWT_KEY_ID` | `JWT_SECRET` | `JWT_RETIRED_KEYS` |
+|---|---|---|---|
+| 0. before | `k1` | old | — |
+| 1. deploy the new key | `k1` | old | `k2:<new>` |
+| 2. promote it | `k2` | new | `k1:<old>` |
+| 3. after one token lifetime | `k2` | new | — |
+
+Only step 3 invalidates anything, and by then every token signed with the
+old key has expired on its own. Each step is safe to roll back.
+
+Two deliberate refusals: a token naming a key this deployment does not
+hold is rejected on the `kid` alone rather than by trying every key, so
+"signed by something we retired" and "forged" stay distinguishable and the
+cost of verification does not grow with a value the caller controls. And a
+malformed `JWT_RETIRED_KEYS` entry fails at startup rather than being
+skipped — silently dropping a retired key logs out every user holding a
+token signed with it, and the only symptom would be a support ticket.
+
+Tokens minted before this change carry no `kid` and verify against the
+active key, so deploying it logs nobody out.
+
 ## Safety scores
 
 `POST /v1/geo/safety/votes` records one user's judgement about one place —

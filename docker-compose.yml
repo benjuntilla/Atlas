@@ -101,6 +101,9 @@ services:
       migrator: { condition: service_completed_successfully }
       kafka: { condition: service_started }
     environment:
+      # Names the active signing key. Rotation adds JWT_RETIRED_KEYS
+      # alongside it — see the rotation table in the README.
+      JWT_KEY_ID: "k1"
       # Development only. auth-service refuses to start without this,
       # because its only email implementation LOGS messages instead of
       # sending them — which puts password reset tokens in the log. Never

@@ -6,6 +6,7 @@ import io.atlas.auth.core.AuthService
 import io.atlas.auth.core.LoggingEmailSender
 import io.atlas.auth.crypto.BcryptPasswordHasher
 import io.atlas.auth.crypto.Jose4jJwtSigner
+import io.atlas.auth.crypto.SigningKey
 import io.atlas.auth.db.DatabaseBootstrap
 import io.atlas.auth.db.ExposedSessionRepository
 import io.atlas.auth.db.ExposedUserRepository
@@ -51,7 +52,20 @@ fun main() {
     val sessions = ExposedSessionRepository()
     val verificationTokens = ExposedVerificationTokenRepository()
     val hasher = BcryptPasswordHasher(cost = 12)
-    val signer = Jose4jJwtSigner(config.jwtSecret)
+    val signer = Jose4jJwtSigner(
+        active = SigningKey(config.jwtKeyId, config.jwtSecret),
+        retired = config.jwtRetiredKeys.map { (id, secret) -> SigningKey(id, secret) },
+    )
+    if (config.jwtRetiredKeys.isNotEmpty()) {
+        // Worth a line in the log: retired keys are meant to be temporary,
+        // and one left in place indefinitely is a key that can still mint
+        // nothing but can still verify everything.
+        LOG.info(
+            "JWT rotation in progress: active={} retired={}",
+            config.jwtKeyId,
+            config.jwtRetiredKeys.map { it.first },
+        )
+    }
 
     // Atlas sends no mail itself; this is the seam a provider plugs into.
     // The logging sender prints the reset token to the log, which is what

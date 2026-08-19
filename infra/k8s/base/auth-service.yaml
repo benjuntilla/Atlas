@@ -86,6 +86,23 @@ spec:
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef: { name: atlas-secrets, key: jwt-secret }
+            # Names the active key in every new token's `kid` header.
+            # Bump it in lockstep with jwt-secret when rotating; see the
+            # rotation table in the README.
+            - name: JWT_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: jwt-key-id }
+            # `kid:secret,...` for keys that no longer sign but must still
+            # verify. Optional: absent means no rotation is in flight, and
+            # it must be emptied again once one completes — a retired key
+            # left in place indefinitely can still verify everything it
+            # ever signed.
+            - name: JWT_RETIRED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: atlas-secrets
+                  key: jwt-retired-keys
+                  optional: true
             - name: KAFKA_BROKERS
               valueFrom:
                 configMapKeyRef: { name: atlas-config, key: KAFKA_BROKERS }
