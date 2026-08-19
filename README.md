@@ -419,6 +419,43 @@ Folding the profile into the cached claims would show a stale
 looking — the user who just clicked the link. `/me` is called when an app
 opens, not per location ping.
 
+## Restore drill
+
+A backup nobody has restored is not a backup, it is a hope. The failure
+modes are unglamorous and specific — a missing PostGIS extension, an owner
+that does not exist on the target, a dump taken with a flag that silently
+skipped the schema — and each is discovered at the worst possible moment
+unless somebody looks first.
+
+```bash
+scripts/restore-drill.sh [SOURCE_DATABASE_URL]
+```
+
+It dumps, restores into a scratch database it creates, and then *checks*
+the result: row counts per table, plus the invariants that matter more
+than row counts.
+
+* **PostGIS is present and a spatial query still runs.** A restore into a
+  database without the extension fails on the geometry columns; one with a
+  different version can restore rows that no longer index.
+* **Tenancy survived** — no user with a null `project_id`, and the
+  bootstrap defaults are still dropped. A restore that quietly restored
+  them would accept unscoped writes afterwards.
+* **Money reconciles** — no negative balances, and no settled transfer
+  whose wallets belong to different projects.
+* **Index, foreign key, and migration-version counts match the source.**
+  These are the objects a `--data-only` dump silently omits.
+
+Safe to run against production: it only ever reads the source, and only
+ever writes to a database it created and drops on exit — including when a
+check fails, so a red drill does not leave litter that makes the next one
+fail for an unrelated reason.
+
+It has been run: 17 tables, 62 indexes, 27 foreign keys, schema version
+70, all invariants green. It was also run against a deliberately broken
+backup — a `--data-only` dump, the classic silently-useless one — and
+failed as it should.
+
 ## Rotating the JWT signing key
 
 A single-secret signer cannot be rotated. Changing the secret invalidates
