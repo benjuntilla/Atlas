@@ -116,6 +116,12 @@ class PaymentsGrpcService(
 }
 
 private fun PaymentError.toGrpcStatusException(): StatusException = when (this) {
+    // The caller named a user that is not theirs. FAILED_PRECONDITION, not
+    // INVALID_ARGUMENT: the id is well-formed, it just does not describe
+    // anyone they can pay.
+    is PaymentError.UnknownUser ->
+        Status.FAILED_PRECONDITION.withDescription(message).asException()
+
     is PaymentError.InvalidAmount -> Status.INVALID_ARGUMENT.withDescription(message).asException()
     is PaymentError.InvalidArgument -> Status.INVALID_ARGUMENT.withDescription(message).asException()
     is PaymentError.TransactionNotFound -> Status.NOT_FOUND.withDescription(message).asException()

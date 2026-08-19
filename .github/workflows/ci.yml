@@ -271,6 +271,24 @@ jobs:
             fi
           done
 
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Fails only on advisories against crates this build actually
+      # compiles. `cargo audit` alone reads Cargo.lock, which lists
+      # optional dependencies no feature ever builds — on this repo that
+      # was five of eight findings, including one rated 7.5 high. A
+      # security check that mostly reports non-exposure is one people
+      # learn to skip.
+      - name: Audit compiled dependencies
+        run: ./scripts/check-dependencies.sh
+
   dart-sdk:
     name: Dart SDK
     runs-on: ubuntu-latest

@@ -529,6 +529,25 @@ not change what another customer's users are told about it.
 rather than materialised — and stays in `events.proto` as the topic a
 future caching pass would use.
 
+## Dependency advisories
+
+```bash
+scripts/check-dependencies.sh
+```
+
+Fails only on advisories against crates this build **actually compiles**.
+
+That distinction is the whole point. `cargo audit` reads `Cargo.lock`, and
+a lockfile lists optional dependencies that no enabled feature ever
+builds. On this repository that was five of eight findings — including
+`quinn-proto` at CVSS 7.5 and the unfixable `rsa` Marvin timing attack,
+neither of which is in any build graph. A security check that mostly
+reports non-exposure is one people learn to skip, and then it stops
+catching the real thing too.
+
+Findings are cross-checked against `cargo tree`, which resolves features.
+Runs in CI as its own job.
+
 ## Alerting
 
 `infra/k8s/base/monitoring/alerts.yaml` holds 11 Prometheus rules. Atlas

@@ -257,6 +257,28 @@ class PaymentsServiceTest {
         }
     }
 
+    /**
+     * Paying a user who is not in your project must fail as the caller's
+     * mistake, not as an internal error.
+     *
+     * `to_user_id` is the one identifier a caller supplies rather than
+     * having derived from their credentials — the whole point is paying
+     * somebody else — and nothing checked it belonged to their project.
+     * Migration 0080 makes the database refuse it; this asserts the fake
+     * refuses it the same way, because a double that is more permissive
+     * than the schema hides exactly this class of bug.
+     */
+    @Test
+    fun `paying a user outside the project is refused`() {
+        val stranger = UUID.randomUUID().toString()
+        wallets.registerMember(projectA, UUID.fromString(rider))
+        // `stranger` is deliberately not registered in projectA.
+
+        assertFailsWith<PaymentError.UnknownUser> {
+            service.initiate(projectA, rider, stranger, 1500, "key-x", ride)
+        }
+    }
+
     @AfterTest
     fun noOp() = Unit
 }

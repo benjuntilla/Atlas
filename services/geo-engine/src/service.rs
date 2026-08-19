@@ -40,6 +40,10 @@ const DEFAULT_NEARBY_LIMIT: u32 = 20;
 const MAX_NEARBY_LIMIT: u32 = 100;
 const MAX_RADIUS_M: f64 = 50_000.0; // 50 km — generous upper bound
 const MAX_ROUTE_CANDIDATES: usize = 10;
+/// Mirrors the gateway's `MAX_ROUTE_POINTS`. Enforced here as well because
+/// the gateway is not the only thing that can reach this RPC, and the cost
+/// this bounds is paid by the database rather than by the gateway.
+const MAX_ROUTE_POINTS: usize = 2_000;
 
 pub struct GeoEngineImpl {
     pool: PgPool,
@@ -202,6 +206,11 @@ impl GeoEngine for GeoEngineImpl {
                 return Err(Status::invalid_argument(
                     "each route candidate needs at least 2 points",
                 ));
+            }
+            if c.points.len() > MAX_ROUTE_POINTS {
+                return Err(Status::invalid_argument(format!(
+                    "at most {MAX_ROUTE_POINTS} points per route candidate"
+                )));
             }
         }
 

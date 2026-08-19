@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(false)
         .build_client(true)
-        .compile(
+        .compile_protos(
             &[
                 "../../proto/auth.proto",
                 "../../proto/geo.proto",

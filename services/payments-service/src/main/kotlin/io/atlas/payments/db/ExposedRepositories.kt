@@ -3,6 +3,7 @@ package io.atlas.payments.db
 import io.atlas.payments.core.DuplicateIdempotencyKey
 import io.atlas.payments.core.TransactionRepository
 import io.atlas.payments.core.TransactionRunner
+import io.atlas.payments.core.PaymentError
 import io.atlas.payments.core.TxRecord
 import io.atlas.payments.core.TxStatus
 import io.atlas.payments.core.Wallet
@@ -58,8 +59,15 @@ class ExposedWalletRepository : WalletRepository {
                         it[updatedAt] = Instant.now()
                     }
                 } catch (e: ExposedSQLException) {
-                    // Concurrent create lost the race; ignore the unique
-                    // violation and re-read the winning row below.
+                    // 23503 is a foreign-key violation, which here means
+                    // the user does not exist IN THIS PROJECT — the
+                    // composite key added by migration 0080. That is the
+                    // caller naming somebody else's user (or a user id
+                    // that is simply wrong), so it must surface as their
+                    // mistake rather than as an internal error.
+                    if (e.sqlState == "23503") throw PaymentError.UnknownUser(userId)
+                    // 23505 means a concurrent create won the race; ignore
+                    // it and re-read the winning row below.
                     if (e.sqlState != "23505") throw e
                 }
                 scoped(projectId, userId).single().toWallet()

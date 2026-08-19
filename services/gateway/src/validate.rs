@@ -18,6 +18,43 @@ pub const MAX_NEARBY_LIMIT: u32 = 100;
 /// Matches `MAX_ROUTE_CANDIDATES` in geo-engine.
 pub const MAX_ROUTE_CANDIDATES: usize = 10;
 
+/// Most points one route candidate may carry.
+///
+/// There was no upper bound at all, only a minimum of two. Every point
+/// becomes a vertex of a PostGIS LineString that `ST_DWithin` is then run
+/// against, so cost grows with the vertex count: measured against the real
+/// database, 1,000 points scored in ~46ms and 50,000 in ~553ms. Ten
+/// candidates of that size is five seconds of database time bought with
+/// one request, and the default quota allows six hundred a minute.
+///
+/// 2,000 is generously above any real route — a turn-by-turn polyline for
+/// a cross-city trip is a few hundred points — while keeping the worst
+/// case per request in the tens of milliseconds.
+pub const MAX_ROUTE_POINTS: usize = 2_000;
+
+/// Check one route candidate's point count.
+///
+/// A free function rather than inline in the handler so it can be tested
+/// without standing up a gateway: the handler sits behind the `AuthUser`
+/// extractor, which needs a live auth-service, and a bound that can only
+/// be exercised through a full stack tends not to be exercised.
+pub fn route_points(route_id: &str, count: usize) -> Result<(), ApiError> {
+    if count < 2 {
+        return Err(ApiError::BadRequest(format!(
+            "route '{route_id}' needs at least 2 points"
+        )));
+    }
+    if count > MAX_ROUTE_POINTS {
+        // Rejected rather than truncated: silently scoring a different
+        // route than the caller asked about would be a wrong answer
+        // presented as a right one.
+        return Err(ApiError::BadRequest(format!(
+            "route '{route_id}' has {count} points; the maximum is {MAX_ROUTE_POINTS}"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject NaN/infinity and out-of-range coordinates.
 ///
 /// NaN matters more than it looks: it survives serde_json as a valid f64
@@ -162,6 +199,31 @@ mod tests {
         assert_eq!(nearby_limit(Some(20)), 20);
         assert_eq!(nearby_limit(Some(MAX_NEARBY_LIMIT)), MAX_NEARBY_LIMIT);
         assert_eq!(nearby_limit(Some(u32::MAX)), MAX_NEARBY_LIMIT);
+    }
+
+    #[test]
+    fn route_points_bounds_both_ends() {
+        assert!(route_points("r", 2).is_ok());
+        assert!(route_points("r", MAX_ROUTE_POINTS).is_ok());
+        // A realistic turn-by-turn polyline is a few hundred points, so
+        // the bound must not reject one.
+        assert!(route_points("r", 500).is_ok());
+
+        assert!(is_bad_request(route_points("r", 0).unwrap_err()));
+        assert!(is_bad_request(route_points("r", 1).unwrap_err()));
+        assert!(is_bad_request(
+            route_points("r", MAX_ROUTE_POINTS + 1).unwrap_err()
+        ));
+    }
+
+    /// The message names the route and both numbers, because the caller
+    /// sent up to ten candidates and needs to know which one to shorten.
+    #[test]
+    fn route_points_error_identifies_the_candidate() {
+        let err = route_points("scenic-route", 50_000).unwrap_err();
+        let rendered = format!("{err:?}");
+        assert!(rendered.contains("scenic-route"), "{rendered}");
+        assert!(rendered.contains("50000"), "{rendered}");
     }
 
     #[test]

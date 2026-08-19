@@ -3,6 +3,7 @@ package io.atlas.payments.fakes
 import io.atlas.payments.core.DuplicateIdempotencyKey
 import io.atlas.payments.core.OutboxBackend
 import io.atlas.payments.core.OutboxDepth
+import io.atlas.payments.core.PaymentError
 import io.atlas.payments.core.OutboxRow
 import io.atlas.payments.core.OutboxStore
 import io.atlas.payments.core.TransactionRepository
@@ -38,8 +39,33 @@ class InMemoryWalletRepository : WalletRepository {
     private val byId = linkedMapOf<Pair<UUID, UUID>, Wallet>()
     private val userToId = linkedMapOf<Pair<UUID, UUID>, UUID>()
 
+    /**
+     * Users known to belong to a project.
+     *
+     * The real repository learns this from the composite (project_id,
+     * user_id) foreign key added by migration 0080. A fake with no notion
+     * of membership would happily create a wallet for anybody, which is
+     * precisely the bug that constraint exists to stop — so the fake
+     * models it rather than being more permissive than the schema.
+     *
+     * Empty means "no membership recorded", and for the many tests that
+     * predate this the fake stays permissive; [registerMember] opts a test
+     * into the strict behaviour.
+     */
+    private val members = linkedMapOf<UUID, MutableSet<UUID>>()
+
+    /** Declare that [userId] is a member of [projectId]. */
+    @Synchronized
+    fun registerMember(projectId: UUID, userId: UUID) {
+        members.getOrPut(projectId) { mutableSetOf() }.add(userId)
+    }
+
     @Synchronized
     override fun getOrCreateByUser(projectId: UUID, userId: UUID): Wallet {
+        val known = members[projectId]
+        if (known != null && userId !in known) {
+            throw PaymentError.UnknownUser(userId)
+        }
         userToId[projectId to userId]?.let { return byId.getValue(projectId to it) }
         val wallet = Wallet(UUID.randomUUID(), userId, 0, "USD")
         byId[projectId to wallet.id] = wallet

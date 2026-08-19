@@ -31,19 +31,19 @@ members = [
 [workspace.dependencies]
 atlas-keys = { path = "crates/atlas-keys" }
 axum = "0.7"
-tonic = "0.11"
-tonic-build = "0.11"
-tonic-health = "0.11"
-prost-build = "0.12"
+tonic = "0.13"
+tonic-build = "0.13"
+tonic-health = "0.13"
+prost-build = "0.13"
 async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "macros", "migrate"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono", "macros", "migrate"] }
 rdkafka = { version = "0.36", features = ["tokio"] }
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.13"
+prost-types = "0.13"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -56,8 +56,8 @@ anyhow = "1"
 sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.22"
-metrics-exporter-prometheus = "0.13"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 # "env" lets the migrator read DATABASE_URL as a flag default, which is how
 # it is invoked in Kubernetes (env var from a Secret, no argv).
 clap = { version = "4.5", features = ["derive", "env"] }

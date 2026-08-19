@@ -192,12 +192,7 @@ async fn score_route(
     // Validate every point up front. A non-finite coordinate would reach
     // ST_MakePoint and come back as an opaque 500 from PostGIS.
     for c in &body.candidates {
-        if c.points.len() < 2 {
-            return Err(ApiError::BadRequest(format!(
-                "route '{}' needs at least 2 points",
-                c.route_id
-            )));
-        }
+        validate::route_points(&c.route_id, c.points.len())?;
         for p in &c.points {
             validate::lat_lng(p.lat, p.lng)?;
         }
