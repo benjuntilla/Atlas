@@ -72,6 +72,28 @@ spec:
               dispatcher is keeping up but only just; consider raising the
               batch size or adding a replica.
 
+        # A transaction the sweep could not resolve is money whose fate
+        # nobody knows: the customer may have been charged with no balance
+        # to show for it, or may not have been. The sweep deliberately
+        # refuses to guess, which means a human has to look.
+        #
+        # Not rate-based. One unresolved transaction is worth a person's
+        # attention, and a rate over five minutes would round a single
+        # occurrence to approximately zero.
+        - alert: AtlasPaymentsUnreconciled
+          expr: increase(atlas_payments_reconciled_total{outcome="unresolved"}[1h]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Payments reconciliation could not resolve a transaction"
+            description: >-
+              {{ $value }} transaction(s) left PENDING because the provider
+              could not be reached or returned an answer the adapter does
+              not recognise. They are safe — nothing was guessed — but they
+              stay stuck until someone checks the provider dashboard
+              against payments.transactions.
+
         # fare-consumer holds its Kafka offset when payments is
         # unreachable, which is correct — but a sustained hold means
         # settlement has stalled behind it.

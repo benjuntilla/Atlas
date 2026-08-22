@@ -11,6 +11,15 @@ interface PaymentsMetrics {
     fun transactionRefunded()
     fun outboxDispatched(count: Int)
 
+    /**
+     * One reconciliation pass.
+     *
+     * `unresolved` is the number worth alerting on: settled and failed are
+     * the sweep doing its job, while unresolved is money whose fate nobody
+     * knows.
+     */
+    fun reconciled(settled: Int, failed: Int, unresolved: Int)
+
     /** A deposit that credited a wallet. This is money entering the platform. */
     fun depositSettled()
 
@@ -26,6 +35,7 @@ interface PaymentsMetrics {
             override fun transactionSettled() {}
             override fun transactionRefunded() {}
             override fun outboxDispatched(count: Int) {}
+            override fun reconciled(settled: Int, failed: Int, unresolved: Int) {}
             override fun depositSettled() {}
             override fun depositFailed() {}
         }

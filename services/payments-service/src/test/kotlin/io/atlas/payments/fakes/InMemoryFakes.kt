@@ -117,6 +117,7 @@ class InMemoryTransactionRepository : TransactionRepository {
         }
         val record = TxRecord(
             id = UUID.randomUUID(),
+            projectId = projectId,
             fromWallet = fromWallet,
             toWallet = toWallet,
             amountCents = amountCents,
@@ -129,6 +130,7 @@ class InMemoryTransactionRepository : TransactionRepository {
         )
         byId[projectId to record.id] = record
         keyToId[projectId to idempotencyKey] = record.id
+        createdAt[record.id] = Instant.now()
         return record
     }
 
@@ -141,6 +143,29 @@ class InMemoryTransactionRepository : TransactionRepository {
     override fun markRefunded(projectId: UUID, id: UUID) {
         byId[projectId to id] = byId.getValue(projectId to id).copy(status = TxStatus.REFUNDED)
     }
+
+    /** When each transaction was created, for the reconciliation sweep. */
+    private val createdAt = linkedMapOf<UUID, Instant>()
+
+    /**
+     * Pretend a transaction was created at [at].
+     *
+     * Tests need rows older than the sweep's threshold without waiting
+     * fifteen minutes, and a clock-injected repository would be a larger
+     * fake than the thing it stands in for.
+     */
+    @Synchronized
+    fun backdate(id: UUID, at: Instant) {
+        createdAt[id] = at
+    }
+
+    @Synchronized
+    override fun findStuckPending(cutoff: Instant, limit: Int): List<TxRecord> =
+        byId.values
+            .filter { it.status == TxStatus.PENDING }
+            .filter { (createdAt[it.id] ?: Instant.now()) < cutoff }
+            .sortedBy { createdAt[it.id] ?: Instant.now() }
+            .take(limit)
 
     @Synchronized
     override fun markFailed(projectId: UUID, id: UUID, reason: String) {

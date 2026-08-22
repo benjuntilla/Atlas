@@ -10,6 +10,7 @@ import io.atlas.payments.core.Wallet
 import io.atlas.payments.core.WalletRepository
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.insert
@@ -35,6 +36,7 @@ private fun ResultRow.toWallet() = Wallet(
 
 private fun ResultRow.toTxRecord() = TxRecord(
     id = this[Transactions.id],
+    projectId = this[Transactions.projectId],
     fromWallet = this[Transactions.fromWallet],
     toWallet = this[Transactions.toWallet],
     amountCents = this[Transactions.amountCents],
@@ -161,6 +163,23 @@ class ExposedTransactionRepository : TransactionRepository {
                 it[status] = TxStatus.REFUNDED
             }
         }
+    }
+
+    /**
+     * `ORDER BY created_at ASC` so the oldest — the ones a customer has
+     * been waiting on longest — are resolved first when the batch limit
+     * bites.
+     */
+    override fun findStuckPending(cutoff: Instant, limit: Int): List<TxRecord> = transaction {
+        Transactions
+            .selectAll()
+            .where {
+                (Transactions.status eq TxStatus.PENDING) and
+                    (Transactions.createdAt less cutoff)
+            }
+            .orderBy(Transactions.createdAt to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toTxRecord() }
     }
 
     override fun markFailed(projectId: UUID, id: UUID, reason: String) {

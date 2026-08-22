@@ -280,6 +280,49 @@ code:
 position rather than by user id, so unscoped it returned every Atlas user
 near a point regardless of who asked.
 
+### Reconciliation, webhooks, and retries
+
+These are the parts of a payments integration that are the same whichever
+processor you pick, so they exist and are tested before one is chosen.
+
+**Reconciliation.** A transaction goes PENDING when the provider
+authorizes and leaves PENDING when it settles or fails. If the process
+dies in between — a deploy, an OOM, a provider timeout after the charge
+went through — the row stays PENDING forever, and nothing retries it
+because nothing knows whether retrying would be a second charge. That is
+money in limbo: the customer may have been charged with no balance to
+show for it, or may not have been, and both look identical from inside
+Atlas.
+
+`ReconciliationSweep` asks the provider what actually happened
+(`PaymentProvider.lookup`) and resolves accordingly. What matters most is
+what it **refuses** to do: when the provider is unreachable or returns
+something the adapter does not recognise, the row is left alone and
+counted as unresolved. Guessing is how a temporary provider outage becomes
+a pile of wrongly-settled balances — and unlike the stuck row, that is not
+fixed by running the job again later. `AtlasPaymentsUnreconciled` alerts
+on it, because the sweep's refusal to guess means a human has to look.
+
+**Webhook signatures.** `HmacWebhookVerifier` implements the scheme Stripe,
+GitHub, Shopify and Adyen's HMAC mode all share: HMAC-SHA256 over the raw
+body with a timestamp. Three properties, each of which has been a real
+CVE somewhere — it signs the **raw** body (re-serialised JSON has
+different bytes), compares in **constant time** (`==` leaks how much of a
+guessed signature was right), and enforces a **timestamp window** in both
+directions, with the timestamp inside the signed material so it cannot be
+moved forward to escape the window. The endpoint also caps the body: it is
+unauthenticated by nature, because the signature covers the body and so
+must be read first.
+
+**Retries.** Every provider call is bounded by a timeout — an unbounded one
+parks a request thread and drains the connection pool behind it, turning a
+slow processor into an outage. But only `authorize` (which carries the
+idempotency key) and `lookup` (which changes nothing) are retried.
+`capture` and `refund` are attempted exactly once: they identify a charge
+but carry no idempotency key of their own, and "usually idempotent" is not
+a property to bet customer money on. The recovery path for an ambiguous
+capture is the reconciliation sweep, not a repeat of the write.
+
 ### Payments and the placeholder provider
 
 `atlas.payments` runs against `FakePaymentProvider`, which approves every

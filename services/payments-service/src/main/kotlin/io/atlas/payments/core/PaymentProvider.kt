@@ -25,6 +25,32 @@ import java.util.UUID
  * retry with the same idempotency key — [authorize] is called with the
  * caller's key precisely so a retry does not double-charge.
  */
+/**
+ * What the provider says a charge's real state is.
+ *
+ * `UNKNOWN` is deliberately not folded into `FAILED`. A provider that
+ * cannot be reached, or that returns something this adapter does not
+ * recognise, has told us nothing — and "nothing" must leave the
+ * transaction alone for a human to look at rather than resolving it in
+ * whichever direction happens to be convenient.
+ */
+enum class ProviderStatus {
+    /** Authorized but not captured. Still in flight. */
+    AUTHORIZED,
+
+    /** Money was taken. */
+    CAPTURED,
+
+    /** The provider declined, or the charge was cancelled. */
+    FAILED,
+
+    /** The provider has no record of this reference at all. */
+    NOT_FOUND,
+
+    /** Could not be determined. Resolve nothing; escalate. */
+    UNKNOWN,
+}
+
 data class ProviderResult(
     val success: Boolean,
     val providerRef: String,
@@ -43,6 +69,21 @@ interface PaymentProvider {
 
     /** Reverse a captured charge. */
     fun refund(providerRef: String): ProviderResult
+
+    /**
+     * Ask the provider what actually happened to a charge.
+     *
+     * Needed for reconciliation, and it is the only honest way to resolve
+     * a transaction stuck in PENDING. A pending row means Atlas started a
+     * charge and never recorded the outcome — the process died between
+     * authorize and capture, or the provider timed out after doing the
+     * work. Guessing either way is wrong: assume success and you credit a
+     * wallet against money that was never collected, assume failure and
+     * you refuse a payment the customer has already made.
+     *
+     * Implementations must not have side effects. This asks a question.
+     */
+    fun lookup(providerRef: String): ProviderStatus
 
     /**
      * Verify that a webhook body genuinely came from the provider.
@@ -79,6 +120,18 @@ class FakePaymentProvider : PaymentProvider {
 
     override fun refund(providerRef: String): ProviderResult =
         ProviderResult(success = true, providerRef = providerRef)
+
+    /**
+     * Reports CAPTURED for anything it minted.
+     *
+     * The fake never loses a charge, so reconciliation against it always
+     * resolves cleanly. That is fine for exercising the sweep's mechanics
+     * and useless for exercising its judgement — which is why the sweep's
+     * tests drive a provider they control rather than this one.
+     */
+    override fun lookup(providerRef: String): ProviderStatus =
+        if (providerRef.startsWith("fake_")) ProviderStatus.CAPTURED
+        else ProviderStatus.NOT_FOUND
 
     /**
      * Accepts anything.

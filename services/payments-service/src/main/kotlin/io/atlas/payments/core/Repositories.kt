@@ -60,6 +60,18 @@ interface TransactionRepository {
      * retrying a charge the provider has already refused.
      */
     fun markFailed(projectId: UUID, id: UUID, reason: String)
+
+    /**
+     * Transactions still PENDING that were created before [cutoff],
+     * oldest first, across ALL projects.
+     *
+     * Deliberately not project-scoped: this is an operator-facing sweep,
+     * not a customer request. Scoping it would mean either running it once
+     * per tenant — a query per project per pass — or having an operator
+     * remember to. Each row carries its own project and every write the
+     * sweep makes is scoped by it.
+     */
+    fun findStuckPending(cutoff: Instant, limit: Int): List<TxRecord>
 }
 
 /**

@@ -16,6 +16,12 @@ data class Wallet(
 
 data class TxRecord(
     val id: UUID,
+    /**
+     * Needed by anything that acts on a record it did not fetch by
+     * project — reconciliation sweeps every tenant's stuck rows in one
+     * pass, then writes each back scoped to its own.
+     */
+    val projectId: UUID,
     val fromWallet: UUID?,
     val toWallet: UUID?,
     val amountCents: Long,

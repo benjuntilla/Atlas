@@ -4,6 +4,7 @@ import io.atlas.payments.core.PaymentProvider
 import io.atlas.payments.core.OutboxBackend
 import io.atlas.payments.core.PaymentsMetrics
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.engine.embeddedServer
@@ -46,7 +47,28 @@ fun startHttpServer(
             }
             post("/webhooks/{provider}") {
                 val source = call.parameters["provider"] ?: "unknown"
+
+                // Bounded before reading. This endpoint is unauthenticated
+                // by nature — the signature is checked after the body is
+                // in hand, because the signature covers the body — so an
+                // unbounded read here is a way for anyone on the internet
+                // to make the service allocate as much memory as they
+                // like. Provider events are a few kilobytes; 1MB is
+                // generous.
+                val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                if (declared != null && declared > MAX_WEBHOOK_BYTES) {
+                    LOG.warn("rejected oversized webhook from provider={} bytes={}", source, declared)
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
                 val body = call.receiveText()
+                if (body.length > MAX_WEBHOOK_BYTES) {
+                    // A chunked request declares no length, so the cap is
+                    // enforced again on what actually arrived.
+                    LOG.warn("rejected oversized webhook from provider={}", source)
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
 
                 // Verify BEFORE doing anything with the payload. This
                 // endpoint is an unauthenticated write path from the public
@@ -74,6 +96,11 @@ fun startHttpServer(
             }
         }
     }.start(wait = false)
+
+/**
+ * Largest webhook body accepted. Provider events run to a few kilobytes.
+ */
+private const val MAX_WEBHOOK_BYTES = 1_000_000
 
 /** Creates the Prometheus registry App.kt shares with the HTTP server and metrics. */
 fun newPrometheusRegistry(): PrometheusMeterRegistry =
@@ -108,6 +135,13 @@ fun registerOutboxGauges(registry: MeterRegistry, backend: OutboxBackend) {
 
 class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
     private val initiated = registry.counter("atlas_payments_transactions_initiated_total")
+    private val reconciledSettled =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "settled")
+    private val reconciledFailed =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "failed")
+    // The one worth alerting on: money whose fate nobody knows.
+    private val reconciledUnresolved =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "unresolved")
     private val settled = registry.counter("atlas_payments_transactions_settled_total")
     private val refunded = registry.counter("atlas_payments_transactions_refunded_total")
     private val dispatched = registry.counter("atlas_payments_outbox_dispatched_total")
@@ -117,6 +151,15 @@ class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
     override fun transactionInitiated() = initiated.increment()
     override fun transactionSettled() = settled.increment()
     override fun transactionRefunded() = refunded.increment()
+    override fun reconciled(settled: Int, failed: Int, unresolved: Int) {
+        if (settled > 0) reconciledSettled.increment(settled.toDouble())
+        if (failed > 0) reconciledFailed.increment(failed.toDouble())
+        // Always recorded, including zero, so the series exists before
+        // anything goes wrong. An alert on a metric that only appears
+        // during an incident cannot fire during the incident.
+        reconciledUnresolved.increment(unresolved.toDouble())
+    }
+
     override fun outboxDispatched(count: Int) = dispatched.increment(count.toDouble())
     override fun depositSettled() = depositOk.increment()
     override fun depositFailed() = depositFail.increment()
