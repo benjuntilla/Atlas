@@ -3,13 +3,19 @@ package io.atlas.auth
 import io.atlas.auth.cache.TokenValidationCache
 import io.atlas.auth.config.EnvConfig
 import io.atlas.auth.core.AuthService
+import io.atlas.auth.core.LoggingEmailSender
 import io.atlas.auth.crypto.BcryptPasswordHasher
 import io.atlas.auth.crypto.Jose4jJwtSigner
+import io.atlas.auth.crypto.SigningKey
 import io.atlas.auth.db.DatabaseBootstrap
 import io.atlas.auth.db.ExposedSessionRepository
 import io.atlas.auth.db.ExposedUserRepository
+import io.atlas.auth.db.ExposedVerificationTokenRepository
 import io.atlas.auth.grpc.AuthGrpcService
 import io.atlas.auth.grpc.HealthCheck
+import io.atlas.auth.http.MicrometerAuthMetrics
+import io.atlas.auth.http.newPrometheusRegistry
+import io.atlas.auth.http.startHttpServer
 import io.atlas.auth.kafka.AuthTokenProducer
 import io.atlas.auth.kafka.TokenEventConsumer
 import io.grpc.ServerBuilder
@@ -32,8 +38,8 @@ private val LOG = LoggerFactory.getLogger("io.atlas.auth.App")
 fun main() {
     val config = EnvConfig.fromEnv()
     LOG.info(
-        "starting auth-service: grpcPort={} dbUrl={} kafkaBrokers={}",
-        config.grpcPort, config.databaseUrl, config.kafkaBrokers,
+        "starting auth-service: grpcPort={} httpPort={} dbUrl={} kafkaBrokers={}",
+        config.grpcPort, config.httpPort, config.databaseUrl, config.kafkaBrokers,
     )
 
     DatabaseBootstrap.connect(
@@ -44,8 +50,48 @@ fun main() {
 
     val users = ExposedUserRepository()
     val sessions = ExposedSessionRepository()
+    val verificationTokens = ExposedVerificationTokenRepository()
     val hasher = BcryptPasswordHasher(cost = 12)
-    val signer = Jose4jJwtSigner(config.jwtSecret)
+    val signer = Jose4jJwtSigner(
+        active = SigningKey(config.jwtKeyId, config.jwtSecret),
+        retired = config.jwtRetiredKeys.map { (id, secret) -> SigningKey(id, secret) },
+    )
+    if (config.jwtRetiredKeys.isNotEmpty()) {
+        // Worth a line in the log: retired keys are meant to be temporary,
+        // and one left in place indefinitely is a key that can still mint
+        // nothing but can still verify everything.
+        LOG.info(
+            "JWT rotation in progress: active={} retired={}",
+            config.jwtKeyId,
+            config.jwtRetiredKeys.map { it.first },
+        )
+    }
+
+    // Atlas sends no mail itself; this is the seam a provider plugs into.
+    // The logging sender prints the reset token to the log, which is what
+    // makes local development possible and what makes production
+    // dangerous — so it has to be asked for by name.
+    val emailSender = if (config.allowLoggingEmail) {
+        LOG.warn(
+            "using LoggingEmailSender: password reset tokens WILL be written " +
+                "to the log. Never set ATLAS_ALLOW_LOGGING_EMAIL in production.",
+        )
+        LoggingEmailSender()
+    } else {
+        // Null, not a fake. The service still serves login and
+        // registration; the two flows that need mail answer 412 naming
+        // the missing configuration. Booting a fake sender by default
+        // would instead accept reset requests and drop them, which a user
+        // experiences as "the email never arrived" and an operator sees
+        // as nothing at all.
+        LOG.warn(
+            "no email provider configured: password reset and email " +
+                "verification will return FAILED_PRECONDITION. Set " +
+                "ATLAS_ALLOW_LOGGING_EMAIL=true for development.",
+        )
+        null
+    }
+
     val authService = AuthService(
         users = users,
         sessions = sessions,
@@ -53,10 +99,15 @@ fun main() {
         signer = signer,
         tokenLifetime = Duration.ofSeconds(config.tokenLifetimeSeconds),
         clock = Clock.systemUTC(),
+        verificationTokens = verificationTokens,
+        email = emailSender,
     )
 
+    val registry = newPrometheusRegistry()
+    val metrics = MicrometerAuthMetrics(registry)
+
     val cache = TokenValidationCache()
-    val producer = AuthTokenProducer.build(config.kafkaBrokers)
+    val producer = AuthTokenProducer.build(config.kafkaBrokers, metrics)
     val consumer = TokenEventConsumer(
         bootstrapServers = config.kafkaBrokers,
         cache = cache,
@@ -68,6 +119,7 @@ fun main() {
         signer = signer,
         cache = cache,
         publisher = producer,
+        metrics = metrics,
     )
 
     val health = HealthCheck()
@@ -77,11 +129,15 @@ fun main() {
         .addService(health.service)
         .build()
 
+    val httpServer = startHttpServer(config.httpPort, registry)
     server.start()
     health.setServing()
     health.setServing("atlas.auth.AuthService")
     consumer.start()
-    LOG.info("started gRPC server on :{}", config.grpcPort)
+    LOG.info(
+        "started gRPC server on :{} and HTTP server on :{}",
+        config.grpcPort, config.httpPort,
+    )
 
     Runtime.getRuntime().addShutdownHook(Thread {
         LOG.info("shutdown signal received, draining")
@@ -94,6 +150,7 @@ fun main() {
         }
         consumer.close()
         producer.close()
+        httpServer.stop(1_000, 5_000)
         LOG.info("auth-service stopped")
     })
 

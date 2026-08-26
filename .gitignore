@@ -54,3 +54,11 @@ infra/terraform/**/*.tfvars
 # Generated protobuf code (each service regenerates from proto/)
 **/generated/
 **/gen/
+
+# Dart SDK build output. `.dart_tool` is a local cache; `pubspec.lock` is
+# deliberately NOT ignored for an application but IS for a library — a
+# library that pins its own lockfile imposes those versions on nobody and
+# only creates merge conflicts.
+sdks/dart/.dart_tool/
+sdks/dart/pubspec.lock
+sdks/dart/build/

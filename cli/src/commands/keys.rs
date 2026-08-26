@@ -104,12 +104,7 @@ async fn create(
     Ok(())
 }
 
-async fn revoke(
-    client: &ApiClient,
-    cfg: &AtlasConfig,
-    prefix: &str,
-    format: Format,
-) -> Result<()> {
+async fn revoke(client: &ApiClient, cfg: &AtlasConfig, prefix: &str, format: Format) -> Result<()> {
     client.revoke_key(&cfg.project.name, prefix).await?;
     if format == Format::Json {
         println!("{}", serde_json::json!({"ok": true, "revoked": prefix}));

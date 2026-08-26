@@ -1,0 +1,10 @@
+[package]
+name = "atlas-keys"
+version = "0.1.0"
+edition = "2021"
+description = "The Atlas API key format: minting, display prefixes, and digests. Shared by the control plane, which issues keys, and the gateway, which resolves them."
+license = "MIT"
+
+[dependencies]
+sha2 = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,146 @@
+# The public edge. This is the only workload in the namespace that takes
+# traffic from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: gateway
+spec:
+  # A normal ClusterIP, unlike the gRPC backends: this serves HTTP/1.1
+  # requests from an Ingress, which kube-proxy spreads correctly.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/component: edge
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never dip below the current replica count while rolling: this is
+      # the front door and there is nothing behind it to absorb a gap.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # No wait-for-schema init container: the gateway never touches
+      # Postgres. It only speaks gRPC to the three backends.
+      containers:
+        - name: gateway
+          image: ghcr.io/nairinn/atlas-gateway:latest
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: HTTP_ADDR
+              value: "0.0.0.0:8080"
+            - name: METRICS_ADDR
+              value: "0.0.0.0:9090"
+            - name: AUTH_SERVICE_ADDR
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: AUTH_SERVICE_ADDR }
+            - name: GEO_ENGINE_ADDR
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: GEO_ENGINE_ADDR }
+            - name: PAYMENTS_SERVICE_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: PAYMENTS_SERVICE_ADDR
+            # Read-only access to control.api_keys, to resolve the
+            # X-Atlas-Key header to a project. The pool is lazy, so a
+            # Postgres outage does not stop this pod from becoming ready —
+            # it makes individual /v1 requests fail with 503, which is
+            # accurate.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            # How long a resolved key stays cached, and therefore how long
+            # `atlas keys revoke` takes to bite.
+            - name: PROJECT_CACHE_TTL_SECONDS
+              value: "30"
+            # Exactly one proxy sits in front (ingress-nginx), so the
+            # client address is the last X-Forwarded-For entry. Leaving this
+            # at 0 would key every unauthenticated request by the ingress
+            # controller's pod IP — one shared bucket for the whole
+            # internet, throttling all users together while doing nothing
+            # about any individual attacker.
+            - name: TRUSTED_PROXY_HOPS
+              value: "1"
+            - name: RATE_LIMIT_PER_MINUTE
+              value: "600"
+            - name: RATE_LIMIT_AUTH_PER_MINUTE
+              value: "10"
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: RUST_LOG }
+          # readyz asserts only that this replica can route HTTP — see
+          # services/gateway/src/routes/ops.rs for why it deliberately does
+          # not depend on backend health. Pulling every gateway replica out
+          # of the load balancer because a backend is down would turn
+          # diagnosable 503s into connection refused.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal and SIGTERM race: without this pause a
+                # pod can stop accepting connections while the Ingress is
+                # still sending it traffic. Sleep first, let the endpoint
+                # propagate, then let the graceful shutdown run.
+                command: ["/bin/sleep", "5"]
+      terminationGracePeriodSeconds: 30

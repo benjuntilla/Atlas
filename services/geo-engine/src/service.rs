@@ -5,10 +5,16 @@
 //!   3. Translates results back to proto messages.
 //!   4. Records latency / counters.
 //!
-//! Trust model: this service trusts the `user_id` strings in request
-//! bodies. The gateway (Phase 5) validates JWTs and forwards already-
-//! authenticated requests. We never re-validate against auth-service on
-//! the hot path.
+//! Trust model: this service trusts the `user_id` and `project_id` strings
+//! in request bodies. The gateway validates the JWT and resolves the API
+//! key, then injects both; neither has a field in any REST DTO, so a
+//! client cannot supply either. We never re-validate against auth-service
+//! on the hot path.
+//!
+//! What this service DOES enforce is that every query is scoped by the
+//! project it was handed. `nearby` in particular searches by position
+//! rather than by user id, so without that scoping it would return every
+//! Atlas user near a point regardless of which customer asked.
 
 use chrono::{TimeZone, Utc};
 use sqlx::PgPool;
@@ -20,10 +26,11 @@ use uuid::Uuid;
 use crate::kafka::LocationProducer;
 use crate::pb::events::LocationUpdateEvent;
 use crate::pb::geo::{
-    geo_engine_server::GeoEngine, CreateGeofenceRequest, DeleteGeofenceRequest,
-    DeleteGeofenceResponse, Geofence, GeofenceCheckRequest, GeofenceCheckResponse,
-    ListGeofencesRequest, ListGeofencesResponse, LocationAck, LocationUpdate, NearbyRequest,
-    NearbyResponse, NearbyUser, RouteScoreRequest, RouteScoreResponse, ScoredRoute,
+    geo_engine_server::GeoEngine, safety_vote_request::Verdict, CreateGeofenceRequest,
+    DeleteGeofenceRequest, DeleteGeofenceResponse, Geofence, GeofenceCheckRequest,
+    GeofenceCheckResponse, ListGeofencesRequest, ListGeofencesResponse, LocationAck,
+    LocationUpdate, NearbyRequest, NearbyResponse, NearbyUser, RouteScoreRequest,
+    RouteScoreResponse, SafetyVoteRequest, SafetyVoteResponse, ScoredRoute,
 };
 use crate::queries;
 
@@ -33,6 +40,10 @@ const DEFAULT_NEARBY_LIMIT: u32 = 20;
 const MAX_NEARBY_LIMIT: u32 = 100;
 const MAX_RADIUS_M: f64 = 50_000.0; // 50 km — generous upper bound
 const MAX_ROUTE_CANDIDATES: usize = 10;
+/// Mirrors the gateway's `MAX_ROUTE_POINTS`. Enforced here as well because
+/// the gateway is not the only thing that can reach this RPC, and the cost
+/// this bounds is paid by the database rather than by the gateway.
+const MAX_ROUTE_POINTS: usize = 2_000;
 
 pub struct GeoEngineImpl {
     pool: PgPool,
@@ -47,6 +58,22 @@ impl GeoEngineImpl {
 
 fn parse_user_id(s: &str) -> Result<Uuid, Status> {
     Uuid::parse_str(s).map_err(|_| Status::invalid_argument("user_id is not a valid UUID"))
+}
+
+/// Parse the project the gateway injected.
+///
+/// Strict on purpose: this side of the boundary trusts its callers, so an
+/// empty project_id cannot have come from a client — only from a bug in
+/// the gateway or a service calling this one directly. Defaulting would
+/// turn that bug into silent cross-tenant reads and writes; failing turns
+/// it into an error someone has to look at.
+fn parse_project_id(s: &str) -> Result<Uuid, Status> {
+    if s.is_empty() {
+        return Err(Status::invalid_argument(
+            "project_id is required; the gateway must inject it",
+        ));
+    }
+    Uuid::parse_str(s).map_err(|_| Status::invalid_argument("project_id is not a valid UUID"))
 }
 
 fn clamp_radius(r: f64) -> Result<f64, Status> {
@@ -72,6 +99,7 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<LocationUpdate>,
     ) -> Result<Response<LocationAck>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
         // Trust the proto-supplied timestamp but fall back to "now" when
         // the client sends 0 (common on first ping before time is set).
@@ -83,15 +111,25 @@ impl GeoEngine for GeoEngineImpl {
             Utc::now()
         };
 
-        queries::locations::insert_location(&self.pool, user_id, r.lat, r.lng, recorded_at)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "insert_location failed");
-                Status::internal("failed to record location")
-            })?;
+        queries::locations::insert_location(
+            &self.pool,
+            project_id,
+            user_id,
+            r.lat,
+            r.lng,
+            recorded_at,
+        )
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "insert_location failed");
+            Status::internal("failed to record location")
+        })?;
 
         // Fire-and-forget Kafka enqueue. The row is in Postgres regardless.
         self.producer.enqueue(&LocationUpdateEvent {
+            // The consumer reads this long after the request is gone and
+            // has no other way to learn the tenant.
+            project_id: project_id.to_string(),
             user_id: r.user_id.clone(),
             lat: r.lat,
             lng: r.lng,
@@ -107,6 +145,7 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<NearbyRequest>,
     ) -> Result<Response<NearbyResponse>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         let requester = parse_user_id(&r.requester_user_id)?;
         let radius = clamp_radius(r.radius_m)?;
         let limit = clamp_limit(r.limit);
@@ -117,12 +156,14 @@ impl GeoEngine for GeoEngineImpl {
         };
 
         let start = Instant::now();
-        let rows = queries::locations::nearby(&self.pool, r.lat, r.lng, radius, requester, limit)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "nearby query failed");
-                Status::internal("nearby query failed")
-            })?;
+        let rows = queries::locations::nearby(
+            &self.pool, project_id, r.lat, r.lng, radius, requester, limit,
+        )
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "nearby query failed");
+            Status::internal("nearby query failed")
+        })?;
         metrics::histogram!(
             "atlas_geo_nearby_query_duration_ms",
             "role" => role.clone(),
@@ -137,6 +178,7 @@ impl GeoEngine for GeoEngineImpl {
                 lng: row.lng,
                 distance_m: row.distance_m,
                 safety_score: row.safety_score,
+                safety_vote_count: row.safety_vote_count,
             })
             .collect();
 
@@ -148,6 +190,7 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<RouteScoreRequest>,
     ) -> Result<Response<RouteScoreResponse>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         if r.candidates.is_empty() {
             return Err(Status::invalid_argument("at least one candidate required"));
         }
@@ -164,6 +207,11 @@ impl GeoEngine for GeoEngineImpl {
                     "each route candidate needs at least 2 points",
                 ));
             }
+            if c.points.len() > MAX_ROUTE_POINTS {
+                return Err(Status::invalid_argument(format!(
+                    "at most {MAX_ROUTE_POINTS} points per route candidate"
+                )));
+            }
         }
 
         let start = Instant::now();
@@ -177,7 +225,7 @@ impl GeoEngine for GeoEngineImpl {
         let mut scored = Vec::with_capacity(r.candidates.len());
         for c in r.candidates {
             let points: Vec<(f64, f64)> = c.points.iter().map(|p| (p.lat, p.lng)).collect();
-            let score = queries::routes::score_route(&self.pool, &points)
+            let result = queries::safety::score_route_line(&self.pool, project_id, &points)
                 .await
                 .map_err(|e| {
                     warn!(error = %e, "score_route query failed");
@@ -185,7 +233,8 @@ impl GeoEngine for GeoEngineImpl {
                 })?;
             scored.push(ScoredRoute {
                 route_id: c.route_id,
-                score,
+                score: result.score,
+                vote_count: result.vote_count,
             });
         }
         metrics::histogram!(
@@ -194,10 +243,16 @@ impl GeoEngine for GeoEngineImpl {
         )
         .record(start.elapsed().as_secs_f64() * 1000.0);
 
-        // Best = highest ELO. Stable: first candidate wins on ties.
+        // Best = highest safety score. Stable: first candidate wins on
+        // ties, which is what makes the answer reproducible when no route
+        // has any votes and every score is the neutral 1500.
         let best = scored
             .iter()
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .expect("non-empty after validation");
 
         Ok(Response::new(RouteScoreResponse {
@@ -212,14 +267,16 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<GeofenceCheckRequest>,
     ) -> Result<Response<GeofenceCheckResponse>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
         let start = Instant::now();
-        let ids = queries::geofences::check_membership(&self.pool, user_id, r.lat, r.lng)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "geofence membership check failed");
-                Status::internal("geofence check failed")
-            })?;
+        let ids =
+            queries::geofences::check_membership(&self.pool, project_id, user_id, r.lat, r.lng)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "geofence membership check failed");
+                    Status::internal("geofence check failed")
+                })?;
         metrics::histogram!("atlas_geo_geofence_check_duration_ms")
             .record(start.elapsed().as_secs_f64() * 1000.0);
 
@@ -234,6 +291,7 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<CreateGeofenceRequest>,
     ) -> Result<Response<Geofence>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
         if !r.radius_m.is_finite() || r.radius_m <= 0.0 || r.radius_m > MAX_RADIUS_M {
             return Err(Status::invalid_argument(
@@ -242,6 +300,7 @@ impl GeoEngine for GeoEngineImpl {
         }
         let row = queries::geofences::create(
             &self.pool,
+            project_id,
             user_id,
             &r.label,
             r.center_lat,
@@ -269,8 +328,9 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<ListGeofencesRequest>,
     ) -> Result<Response<ListGeofencesResponse>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
         let user_id = parse_user_id(&r.user_id)?;
-        let rows = queries::geofences::list(&self.pool, user_id, r.active_only)
+        let rows = queries::geofences::list(&self.pool, project_id, user_id, r.active_only)
             .await
             .map_err(|e| {
                 warn!(error = %e, "list_geofences failed");
@@ -286,15 +346,68 @@ impl GeoEngine for GeoEngineImpl {
         req: Request<DeleteGeofenceRequest>,
     ) -> Result<Response<DeleteGeofenceResponse>, Status> {
         let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
+        let user_id = parse_user_id(&r.user_id)?;
         let geofence_id = Uuid::parse_str(&r.geofence_id)
             .map_err(|_| Status::invalid_argument("geofence_id is not a valid UUID"))?;
-        let deleted = queries::geofences::deactivate(&self.pool, geofence_id)
+        let deleted = queries::geofences::deactivate(&self.pool, project_id, user_id, geofence_id)
             .await
             .map_err(|e| {
                 warn!(error = %e, "delete_geofence failed");
                 Status::internal("delete_geofence failed")
             })?;
         Ok(Response::new(DeleteGeofenceResponse { deleted }))
+    }
+
+    async fn cast_safety_vote(
+        &self,
+        req: Request<SafetyVoteRequest>,
+    ) -> Result<Response<SafetyVoteResponse>, Status> {
+        let r = req.into_inner();
+        let project_id = parse_project_id(&r.project_id)?;
+        let user_id = parse_user_id(&r.user_id)?;
+
+        // VERDICT_UNKNOWN is proto3's zero value, so it is what an unset
+        // field arrives as. Counting it as either verdict would let a
+        // client that forgot the field silently move scores.
+        let verdict = match Verdict::try_from(r.verdict) {
+            Ok(Verdict::Safe) => queries::safety::Verdict::Safe,
+            Ok(Verdict::Unsafe) => queries::safety::Verdict::Unsafe,
+            _ => return Err(Status::invalid_argument("verdict must be SAFE or UNSAFE")),
+        };
+
+        if !r.lat.is_finite() || !r.lng.is_finite() {
+            return Err(Status::invalid_argument("lat and lng must be finite"));
+        }
+
+        let score =
+            queries::safety::cast_vote(&self.pool, project_id, user_id, r.lat, r.lng, verdict)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "cast_safety_vote failed");
+                    // An unknown user_id is a foreign-key violation, which
+                    // is the caller's mistake rather than ours.
+                    if let sqlx::Error::Database(dbe) = &e {
+                        if dbe.constraint().is_some() {
+                            return Status::failed_precondition("user_id does not exist");
+                        }
+                    }
+                    Status::internal("cast_safety_vote failed")
+                })?;
+
+        metrics::counter!(
+            "atlas_geo_safety_votes_total",
+            "verdict" => match verdict {
+                queries::safety::Verdict::Safe => "safe",
+                queries::safety::Verdict::Unsafe => "unsafe",
+            },
+        )
+        .increment(1);
+
+        Ok(Response::new(SafetyVoteResponse {
+            safety_score: score.score,
+            vote_count: score.vote_count,
+        }))
     }
 }
 
@@ -320,10 +433,7 @@ mod tests {
     #[test]
     fn parse_user_id_accepts_uuid() {
         let id = parse_user_id("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(
-            id.to_string(),
-            "550e8400-e29b-41d4-a716-446655440000"
-        );
+        assert_eq!(id.to_string(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+# Pin the toolchain so `cargo clippy` locally and `cargo clippy` in CI are
+# the same compiler.
+#
+# Without this, the runner's preinstalled stable drifts ahead of whatever a
+# developer happens to have, and new clippy lints land as a red CI run on a
+# branch that was green locally — which is exactly how the
+# `collapsible_match` failure in control-plane/status.rs got in. Bump this
+# deliberately, and fix the new lints in the same commit.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

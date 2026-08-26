@@ -12,9 +12,13 @@ import java.util.UUID
 
 data class User(
     val id: UUID,
+    /** The project this user belongs to. Users are scoped, never global. */
+    val projectId: UUID,
     val email: String,
     val passwordHash: String,
     val createdAt: Instant,
+    /** When the address was confirmed; null means unverified. */
+    val emailVerifiedAt: Instant? = null,
 )
 
 data class Session(
@@ -33,6 +37,13 @@ data class Session(
  */
 data class TokenClaims(
     val userId: UUID,
+    /**
+     * Signed into the token at issue time so it cannot be swapped later.
+     * The gateway compares this against the project its API key resolved
+     * to, which is what stops a token minted in one project from being
+     * replayed against another.
+     */
+    val projectId: UUID,
     val sessionId: UUID,
     val issuedAt: Instant,
     val expiresAt: Instant,

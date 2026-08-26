@@ -3,12 +3,15 @@ package io.atlas.payments.db
 import io.atlas.payments.core.DuplicateIdempotencyKey
 import io.atlas.payments.core.TransactionRepository
 import io.atlas.payments.core.TransactionRunner
+import io.atlas.payments.core.PaymentError
 import io.atlas.payments.core.TxRecord
 import io.atlas.payments.core.TxStatus
 import io.atlas.payments.core.Wallet
 import io.atlas.payments.core.WalletRepository
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.plus
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -33,6 +36,7 @@ private fun ResultRow.toWallet() = Wallet(
 
 private fun ResultRow.toTxRecord() = TxRecord(
     id = this[Transactions.id],
+    projectId = this[Transactions.projectId],
     fromWallet = this[Transactions.fromWallet],
     toWallet = this[Transactions.toWallet],
     amountCents = this[Transactions.amountCents],
@@ -41,56 +45,79 @@ private fun ResultRow.toTxRecord() = TxRecord(
     rideId = this[Transactions.rideId],
     providerRef = this[Transactions.providerRef],
     idempotencyArgsHash = this[Transactions.idempotencyArgsHash],
+    kind = this[Transactions.kind],
 )
 
 class ExposedWalletRepository : WalletRepository {
-    override fun getOrCreateByUser(userId: UUID): Wallet = transaction {
-        Wallets.selectAll().where { Wallets.userId eq userId }.singleOrNull()?.toWallet()
+    override fun getOrCreateByUser(projectId: UUID, userId: UUID): Wallet = transaction {
+        scoped(projectId, userId).singleOrNull()?.toWallet()
             ?: run {
                 try {
                     Wallets.insert {
+                        it[Wallets.projectId] = projectId
                         it[Wallets.userId] = userId
                         it[balanceCents] = 0
                         it[currency] = "USD"
                         it[updatedAt] = Instant.now()
                     }
                 } catch (e: ExposedSQLException) {
-                    // Concurrent create lost the race; ignore the unique
-                    // violation and re-read the winning row below.
+                    // 23503 is a foreign-key violation, which here means
+                    // the user does not exist IN THIS PROJECT — the
+                    // composite key added by migration 0080. That is the
+                    // caller naming somebody else's user (or a user id
+                    // that is simply wrong), so it must surface as their
+                    // mistake rather than as an internal error.
+                    if (e.sqlState == "23503") throw PaymentError.UnknownUser(userId)
+                    // 23505 means a concurrent create won the race; ignore
+                    // it and re-read the winning row below.
                     if (e.sqlState != "23505") throw e
                 }
-                Wallets.selectAll().where { Wallets.userId eq userId }.single().toWallet()
+                scoped(projectId, userId).single().toWallet()
             }
     }
 
-    override fun findByUser(userId: UUID): Wallet? = transaction {
-        Wallets.selectAll().where { Wallets.userId eq userId }.singleOrNull()?.toWallet()
+    override fun findByUser(projectId: UUID, userId: UUID): Wallet? = transaction {
+        scoped(projectId, userId).singleOrNull()?.toWallet()
     }
 
-    override fun findById(id: UUID): Wallet? = transaction {
-        Wallets.selectAll().where { Wallets.id eq id }.singleOrNull()?.toWallet()
+    override fun findById(projectId: UUID, id: UUID): Wallet? = transaction {
+        Wallets.selectAll()
+            .where { (Wallets.projectId eq projectId) and (Wallets.id eq id) }
+            .singleOrNull()?.toWallet()
     }
 
-    override fun adjustBalance(walletId: UUID, deltaCents: Long) {
+    // The project predicate is redundant while walletId comes from a
+    // scoped lookup, and that is exactly why it is here: this is the
+    // statement that moves money, and it should not depend on every
+    // caller having been careful.
+    override fun adjustBalance(projectId: UUID, walletId: UUID, deltaCents: Long) {
         transaction {
-            Wallets.update({ Wallets.id eq walletId }) {
+            Wallets.update({ (Wallets.projectId eq projectId) and (Wallets.id eq walletId) }) {
                 it[balanceCents] = balanceCents + deltaCents
                 it[updatedAt] = Instant.now()
             }
         }
     }
+
+    private fun scoped(projectId: UUID, userId: UUID) =
+        Wallets.selectAll().where { (Wallets.projectId eq projectId) and (Wallets.userId eq userId) }
 }
 
 class ExposedTransactionRepository : TransactionRepository {
-    override fun findByIdempotencyKey(key: String): TxRecord? = transaction {
-        Transactions.selectAll().where { Transactions.idempotencyKey eq key }.singleOrNull()?.toTxRecord()
+    override fun findByIdempotencyKey(projectId: UUID, key: String): TxRecord? = transaction {
+        Transactions.selectAll()
+            .where { (Transactions.projectId eq projectId) and (Transactions.idempotencyKey eq key) }
+            .singleOrNull()?.toTxRecord()
     }
 
-    override fun findById(id: UUID): TxRecord? = transaction {
-        Transactions.selectAll().where { Transactions.id eq id }.singleOrNull()?.toTxRecord()
+    override fun findById(projectId: UUID, id: UUID): TxRecord? = transaction {
+        Transactions.selectAll()
+            .where { (Transactions.projectId eq projectId) and (Transactions.id eq id) }
+            .singleOrNull()?.toTxRecord()
     }
 
     override fun insertPending(
+        projectId: UUID,
         fromWallet: UUID?,
         toWallet: UUID?,
         amountCents: Long,
@@ -98,9 +125,11 @@ class ExposedTransactionRepository : TransactionRepository {
         rideId: UUID?,
         providerRef: String?,
         argsHash: String?,
+        kind: String,
     ): TxRecord = transaction {
         try {
             val id = Transactions.insert {
+                it[Transactions.projectId] = projectId
                 it[Transactions.fromWallet] = fromWallet
                 it[Transactions.toWallet] = toWallet
                 it[Transactions.amountCents] = amountCents
@@ -109,6 +138,7 @@ class ExposedTransactionRepository : TransactionRepository {
                 it[Transactions.rideId] = rideId
                 it[Transactions.providerRef] = providerRef
                 it[idempotencyArgsHash] = argsHash
+                it[Transactions.kind] = kind
                 it[createdAt] = Instant.now()
             } get Transactions.id
             Transactions.selectAll().where { Transactions.id eq id }.single().toTxRecord()
@@ -118,21 +148,55 @@ class ExposedTransactionRepository : TransactionRepository {
         }
     }
 
-    override fun markSettled(id: UUID, settledAt: Instant) {
+    override fun markSettled(projectId: UUID, id: UUID, settledAt: Instant) {
         transaction {
-            Transactions.update({ Transactions.id eq id }) {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
                 it[status] = TxStatus.SETTLED
                 it[Transactions.settledAt] = settledAt
             }
         }
     }
 
-    override fun markRefunded(id: UUID) {
+    override fun markRefunded(projectId: UUID, id: UUID) {
         transaction {
-            Transactions.update({ Transactions.id eq id }) {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
                 it[status] = TxStatus.REFUNDED
             }
         }
+    }
+
+    /**
+     * `ORDER BY created_at ASC` so the oldest — the ones a customer has
+     * been waiting on longest — are resolved first when the batch limit
+     * bites.
+     */
+    override fun findStuckPending(cutoff: Instant, limit: Int): List<TxRecord> = transaction {
+        Transactions
+            .selectAll()
+            .where {
+                (Transactions.status eq TxStatus.PENDING) and
+                    (Transactions.createdAt less cutoff)
+            }
+            .orderBy(Transactions.createdAt to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toTxRecord() }
+    }
+
+    override fun markFailed(projectId: UUID, id: UUID, reason: String) {
+        transaction {
+            Transactions.update({ (Transactions.projectId eq projectId) and (Transactions.id eq id) }) {
+                it[status] = TxStatus.FAILED
+            }
+        }
+        // The reason is logged rather than stored: payments.transactions has
+        // no column for it, and adding one to carry a provider string that
+        // is only ever read by a human is not worth a migration. The
+        // provider_ref on the row is what reconciliation actually needs.
+        LOG.warn("transaction {} marked failed: {}", id, reason)
+    }
+
+    private companion object {
+        private val LOG = org.slf4j.LoggerFactory.getLogger(ExposedTransactionRepository::class.java)
     }
 }
 

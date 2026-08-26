@@ -15,7 +15,34 @@ data class EnvConfig(
     val jwtSecret: String,
     val kafkaBrokers: String,
     val grpcPort: Int,
+    /** Prometheus scrape + /healthz. Never expose this publicly. */
+    val httpPort: Int,
     val tokenLifetimeSeconds: Long,
+    /**
+     * Whether to accept the development email sender, which logs messages
+     * instead of delivering them.
+     *
+     * Defaults to false so a deployment that forgot to configure a mail
+     * provider fails at startup rather than silently printing password
+     * reset tokens into the log aggregator, where anyone with log access
+     * could redeem them.
+     */
+    val allowLoggingEmail: Boolean,
+    /**
+     * Identifier for the ACTIVE signing key, written into every new
+     * token's `kid` header.
+     */
+    val jwtKeyId: String,
+    /**
+     * Keys that no longer sign but must still verify, as
+     * `kid:secret,kid:secret`.
+     *
+     * This is what makes a rotation survivable: during step 2 of a
+     * rotation the previous key lives here, so tokens minted before the
+     * switch keep working until they expire naturally instead of every
+     * user being logged out at once.
+     */
+    val jwtRetiredKeys: List<Pair<String, String>>,
 ) {
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): EnvConfig {
@@ -30,8 +57,34 @@ data class EnvConfig(
                     ?: "dev_secret_change_in_prod_dev_secret_change_in_prod",
                 kafkaBrokers = env["KAFKA_BROKERS"] ?: "localhost:9092",
                 grpcPort = env["GRPC_PORT"]?.toInt() ?: 50051,
+                httpPort = env["HTTP_PORT"]?.toInt() ?: 8051,
                 tokenLifetimeSeconds = env["TOKEN_LIFETIME_SECONDS"]?.toLong() ?: 3600,
+                allowLoggingEmail =
+                    env["ATLAS_ALLOW_LOGGING_EMAIL"]?.equals("true", ignoreCase = true) ?: false,
+                jwtKeyId = env["JWT_KEY_ID"] ?: "k1",
+                jwtRetiredKeys = parseRetiredKeys(env["JWT_RETIRED_KEYS"]),
             )
+        }
+
+        /**
+         * Parse `kid:secret,kid:secret`.
+         *
+         * A malformed entry throws rather than being skipped. Silently
+         * dropping a retired key would mean tokens signed with it stop
+         * verifying — every user holding one is logged out — and the only
+         * symptom would be a support ticket. Failing at startup is the
+         * kind of loud that gets noticed before traffic arrives.
+         */
+        internal fun parseRetiredKeys(raw: String?): List<Pair<String, String>> {
+            if (raw.isNullOrBlank()) return emptyList()
+            return raw.split(',').map { entry ->
+                val trimmed = entry.trim()
+                val idx = trimmed.indexOf(':')
+                require(idx > 0 && idx < trimmed.length - 1) {
+                    "JWT_RETIRED_KEYS entries must be kid:secret; got '$trimmed'"
+                }
+                trimmed.substring(0, idx) to trimmed.substring(idx + 1)
+            }
         }
 
         // Postgres URLs in compose files use the libpq form

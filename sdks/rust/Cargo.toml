@@ -1,0 +1,25 @@
+[package]
+name = "atlas-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust client for the Atlas platform: auth, geo, and payments."
+repository = "https://github.com/Nairinn/Atlas"
+
+[dependencies]
+# rustls rather than the system OpenSSL: the SDK ends up in containers
+# built FROM scratch and in cross-compiled binaries, where linking against
+# a system TLS library is exactly the thing that breaks.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Tests bind a real HTTP server on a real port rather than mocking the
+# transport, so headers, retries, and JSON handling are exercised as they
+# actually run — the same choice the TypeScript SDK makes.
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"

@@ -1,0 +1,112 @@
+name: Images
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  # Pull requests build every image but push none. Nothing else in CI runs
+  # the Dockerfiles, so without this a broken one is only discovered at
+  # deploy time.
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One broken image should not hide the state of the other eight.
+      fail-fast: false
+      matrix:
+        include:
+          - name: migrator
+            dockerfile: tools/migrator/Dockerfile
+          - name: gateway
+            dockerfile: services/gateway/Dockerfile
+          - name: control-plane
+            dockerfile: services/control-plane/Dockerfile
+          - name: auth-service
+            dockerfile: services/auth-service/Dockerfile
+          - name: geo-engine
+            dockerfile: services/geo-engine/Dockerfile
+          - name: payments-service
+            dockerfile: services/payments-service/Dockerfile
+          - name: location-consumer
+            dockerfile: consumers/location-consumer/Dockerfile
+          - name: safety-consumer
+            dockerfile: consumers/safety-consumer/Dockerfile
+          - name: fare-consumer
+            dockerfile: consumers/fare-consumer/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests: a fork PR has no package-write token, and
+      # nothing is being pushed anyway.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # GHCR paths must be lowercase and github.repository_owner keeps
+          # the account's original casing ("Nairinn"). metadata-action
+          # lowercases the image name itself, which is the only reason this
+          # works without an explicit conversion.
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/atlas-${{ matrix.name }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Every Dockerfile in this repo COPYs from the repo root: the Rust
+          # ones because Cargo workspace member paths are relative to it,
+          # the Kotlin ones because the Gradle build and protobuf plugin
+          # read from $rootDir. So the context is always ".".
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in GHA storage, scoped per image so the nine builds
+          # do not evict each other.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  # A single gate the branch protection rule can require, instead of nine.
+  images-complete:
+    name: All images built
+    runs-on: ubuntu-latest
+    needs: images
+    if: always()
+    steps:
+      - name: Check matrix result
+        run: |
+          if [ "${{ needs.images.result }}" != "success" ]; then
+            echo "one or more image builds failed"
+            exit 1
+          fi
+          echo "all images built"

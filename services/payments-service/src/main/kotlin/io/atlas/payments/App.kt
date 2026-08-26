@@ -1,7 +1,9 @@
 package io.atlas.payments
 
 import io.atlas.payments.config.EnvConfig
-import io.atlas.payments.core.FakePaymentProvider
+import io.atlas.payments.core.PaymentProviders
+import io.atlas.payments.core.ReconciliationSweep
+import io.atlas.payments.core.RetryingPaymentProvider
 import io.atlas.payments.core.PaymentsService
 import io.atlas.payments.db.DatabaseBootstrap
 import io.atlas.payments.db.ExposedOutboxBackend
@@ -13,6 +15,7 @@ import io.atlas.payments.grpc.HealthCheck
 import io.atlas.payments.grpc.PaymentsGrpcService
 import io.atlas.payments.http.MicrometerPaymentsMetrics
 import io.atlas.payments.http.newPrometheusRegistry
+import io.atlas.payments.http.registerOutboxGauges
 import io.atlas.payments.http.startHttpServer
 import io.atlas.payments.kafka.FareEventProducer
 import io.atlas.payments.outbox.OutboxDispatcher
@@ -20,6 +23,7 @@ import io.grpc.ServerBuilder
 import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -31,6 +35,12 @@ import java.util.concurrent.TimeUnit
  * Graceful shutdown flips health to NOT_SERVING, stops the dispatcher, drains
  * in-flight RPCs, stops the HTTP server, and closes the Kafka producer.
  */
+/** Delay before the first sweep, so a rolling deploy does not stampede. */
+private const val RECONCILE_INITIAL_DELAY_SECONDS = 120L
+
+/** How often to sweep. Stuck rows are not urgent, but they are not fine. */
+private const val RECONCILE_INTERVAL_SECONDS = 300L
+
 private val LOG = LoggerFactory.getLogger("io.atlas.payments.App")
 
 fun main() {
@@ -53,7 +63,16 @@ fun main() {
     val transactions = ExposedTransactionRepository()
     val outboxStore = ExposedOutboxStore()
     val runner = ExposedTransactionRunner()
-    val provider = FakePaymentProvider()
+    // Selected by PAYMENT_PROVIDER. An unknown value throws here rather
+    // than silently falling back to the fake, which in production would
+    // approve every charge against money never collected.
+    // Wrapped so every provider call is bounded and the safely-retryable
+    // ones are retried. See RetryingPaymentProvider for why capture and
+    // refund deliberately are not.
+    val provider = RetryingPaymentProvider(
+        PaymentProviders.fromName(config.paymentProvider),
+    )
+    LOG.info("payment provider: {}", provider.name)
 
     val payments = PaymentsService(
         wallets = wallets,
@@ -67,8 +86,13 @@ fun main() {
     )
 
     val publisher = FareEventProducer.build(config.kafkaBrokers)
+    val outboxBackend = ExposedOutboxBackend()
+    // Scraped, not pushed: a stuck outbox is money not moving, and the
+    // gauge is what makes that visible without anyone querying the table.
+    registerOutboxGauges(registry, outboxBackend)
+
     val dispatcher = OutboxDispatcher(
-        backend = ExposedOutboxBackend(),
+        backend = outboxBackend,
         publisher = publisher,
         pollInterval = Duration.ofSeconds(config.outboxPollSeconds),
         batchSize = config.outboxBatchSize,
@@ -83,11 +107,49 @@ fun main() {
         .addService(health.service)
         .build()
 
-    val httpServer = startHttpServer(config.httpPort, registry)
+    val httpServer = startHttpServer(config.httpPort, registry, provider)
     server.start()
     health.setServing()
     health.setServing("atlas.payments.PaymentsService")
     dispatcher.start()
+
+    // Resolves transactions left PENDING by a crash or a lost provider
+    // response. Runs on a timer rather than on demand because the rows it
+    // fixes are, by definition, ones nobody is watching.
+    val reconciliation = ReconciliationSweep(
+        transactions = transactions,
+        wallets = wallets,
+        provider = provider,
+        runner = runner,
+        metrics = metrics,
+    )
+    val reconciler = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "reconciliation").apply { isDaemon = true }
+    }
+    reconciler.scheduleWithFixedDelay(
+        {
+            try {
+                val outcome = reconciliation.runOnce()
+                if (outcome.total > 0) {
+                    LOG.info(
+                        "reconciliation: settled={} failed={} unresolved={}",
+                        outcome.settled, outcome.failed, outcome.unresolved,
+                    )
+                }
+            } catch (e: Exception) {
+                // A failed pass must never kill the schedule: the rows are
+                // still there and the next tick retries them.
+                LOG.warn("reconciliation pass failed; will retry", e)
+            }
+        },
+        // Not at startup: during a rolling deploy several instances would
+        // sweep at once, and the first minutes after a restart are when
+        // in-flight transactions look most like stuck ones.
+        RECONCILE_INITIAL_DELAY_SECONDS,
+        RECONCILE_INTERVAL_SECONDS,
+        TimeUnit.SECONDS,
+    )
+
     LOG.info("started gRPC server on :{} and HTTP server on :{}", config.grpcPort, config.httpPort)
 
     Runtime.getRuntime().addShutdownHook(Thread {
@@ -95,6 +157,7 @@ fun main() {
         health.setNotServing()
         health.shutdown()
         dispatcher.close()
+        reconciler.shutdownNow()
         try {
             server.shutdown().awaitTermination(15, TimeUnit.SECONDS)
         } catch (e: InterruptedException) {

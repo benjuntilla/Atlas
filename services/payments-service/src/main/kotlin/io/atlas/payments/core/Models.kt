@@ -16,6 +16,12 @@ data class Wallet(
 
 data class TxRecord(
     val id: UUID,
+    /**
+     * Needed by anything that acts on a record it did not fetch by
+     * project — reconciliation sweeps every tenant's stuck rows in one
+     * pass, then writes each back scoped to its own.
+     */
+    val projectId: UUID,
     val fromWallet: UUID?,
     val toWallet: UUID?,
     val amountCents: Long,
@@ -24,6 +30,8 @@ data class TxRecord(
     val rideId: UUID?,
     val providerRef: String?,
     val idempotencyArgsHash: String?,
+    /** One of [TxKind]. Defaulted so existing construction sites are unchanged. */
+    val kind: String = TxKind.TRANSFER,
 )
 
 /** A pending outbox row claimed by the dispatcher for publishing. */
@@ -53,6 +61,19 @@ data class OutboxRow(
 }
 
 // Transaction status constants (mirrors the CHECK constraint in 0030_payments.sql).
+/**
+ * How money entered or left a transaction.
+ *
+ * WITHDRAWAL is declared but not yet implemented — payouts are the mirror
+ * of deposits and need the same provider handling. It is here so the
+ * status vocabulary is complete in one place rather than growing later.
+ */
+object TxKind {
+    const val TRANSFER = "transfer"
+    const val DEPOSIT = "deposit"
+    const val WITHDRAWAL = "withdrawal"
+}
+
 object TxStatus {
     const val PENDING = "pending"
     const val SETTLED = "settled"

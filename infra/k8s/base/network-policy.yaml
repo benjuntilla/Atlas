@@ -1,0 +1,99 @@
+# Network policy.
+#
+# The gateway's whole security model rests on it being the only way in —
+# geo-engine trusts the user_id in request bodies precisely because the
+# gateway validated the JWT first (see services/gateway/src/lib.rs). If
+# anything else in the cluster can dial geo-engine on 50052 directly, that
+# assumption is false and the trust boundary is decorative.
+#
+# These policies make it structurally true rather than merely intended.
+#
+# Requires a CNI that enforces NetworkPolicy. On GKE that means Dataplane V2
+# or Calico; without one, these objects are accepted by the API server and
+# silently do nothing.
+---
+# Default deny for ingress. Every allowance below is additive.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# The three backends accept gRPC from the gateway only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backends-from-gateway
+  namespace: atlas
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [auth-service, geo-engine, payments-service]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+        # The control plane probes gRPC health for `atlas status`.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: control-plane
+        # fare-consumer calls payments to settle and refund. This is the
+        # server-side path that replaces the settle/refund routes the
+        # gateway deliberately does not expose.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fare-consumer
+      ports:
+        - { protocol: TCP, port: 50051 }
+        - { protocol: TCP, port: 50052 }
+        - { protocol: TCP, port: 50053 }
+---
+# Metrics scraping, from the monitoring namespace only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: atlas
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { protocol: TCP, port: 9090 }
+        - { protocol: TCP, port: 8051 }
+        - { protocol: TCP, port: 8053 }
+        - { protocol: TCP, port: 8054 }
+---
+# Public entry points. The ingress controller reaches the gateway and the
+# control plane, and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-from-ingress
+  namespace: atlas
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [gateway, control-plane]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8081 }

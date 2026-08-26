@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: geo-engine
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: geo-engine
+spec:
+  # Headless for the same gRPC load-balancing reason as auth-service.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: geo-engine
+  ports:
+    - name: grpc
+      port: 50052
+      targetPort: grpc
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: geo-engine
+  namespace: atlas
+  labels:
+    app.kubernetes.io/name: geo-engine
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: geo-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: geo-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-schema
+          image: ghcr.io/nairinn/atlas-migrator:latest
+          args: ["status", "--check"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: geo-engine
+          image: ghcr.io/nairinn/atlas-geo-engine:latest
+          ports:
+            - name: grpc
+              containerPort: 50052
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: GRPC_ADDR
+              value: "0.0.0.0:50052"
+            - name: METRICS_ADDR
+              value: "0.0.0.0:9090"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: atlas-secrets, key: database-url }
+            # PostGIS proximity queries are the hottest path in the
+            # platform; give each replica a wider pool than the default 20
+            # only if the database can take it. Sized here so the total
+            # across replicas stays under Postgres' max_connections.
+            - name: DATABASE_POOL_SIZE
+              value: "20"
+            - name: KAFKA_BROKERS
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: KAFKA_BROKERS }
+            - name: KAFKA_TOPIC_LOCATION_UPDATES
+              valueFrom:
+                configMapKeyRef:
+                  name: atlas-config
+                  key: KAFKA_TOPIC_LOCATION_UPDATES
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef: { name: atlas-config, key: RUST_LOG }
+          startupProbe:
+            grpc: { port: 50052 }
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            grpc: { port: 50052 }
+            periodSeconds: 5
+          livenessProbe:
+            grpc: { port: 50052 }
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      terminationGracePeriodSeconds: 30

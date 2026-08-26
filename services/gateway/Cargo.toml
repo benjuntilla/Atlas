@@ -1,0 +1,43 @@
+[package]
+name = "atlas-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Public HTTPS edge for the Atlas platform: JWT validation and REST-to-gRPC fanout across auth, geo, and payments."
+license = "MIT"
+
+[[bin]]
+name = "atlas-gateway"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+governor = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+atlas-keys = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+prost-build = { workspace = true }
+
+[dev-dependencies]
+# Router-level tests drive the service through tower's `oneshot` without
+# binding a port. No upstream gRPC servers required for the paths that
+# reject before fanout (bad JSON, missing bearer, malformed coordinates).
+tower = { workspace = true, features = ["util"] }
+# tenant_test.rs mints keys with real expiry timestamps.
+chrono = { workspace = true }

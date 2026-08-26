@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atlas
+  labels:
+    app.kubernetes.io/part-of: atlas
+    # Enforce the restricted Pod Security Standard. Every workload here
+    # runs as non-root with no capabilities, so this costs nothing and
+    # stops a future manifest from quietly asking for privilege.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

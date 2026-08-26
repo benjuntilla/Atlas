@@ -22,8 +22,29 @@ pub struct GeofenceRow {
     pub created_at: DateTime<Utc>,
 }
 
+/// The column tuple every geofence query projects, in SELECT order.
+/// `create` and `list` share the same projection, so they share one name
+/// for it rather than repeating an eight-element tuple type each.
+type GeofenceTuple = (Uuid, Uuid, String, f64, f64, f64, bool, DateTime<Utc>);
+
+impl From<GeofenceTuple> for GeofenceRow {
+    fn from(t: GeofenceTuple) -> Self {
+        Self {
+            id: t.0,
+            user_id: t.1,
+            label: t.2,
+            center_lat: t.3,
+            center_lng: t.4,
+            radius_m: t.5,
+            active: t.6,
+            created_at: t.7,
+        }
+    }
+}
+
 pub async fn create(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     label: &str,
     center_lat: f64,
@@ -32,10 +53,11 @@ pub async fn create(
 ) -> Result<GeofenceRow, sqlx::Error> {
     // NULLIF turns an empty string into SQL NULL so the column distinction
     // between "unlabeled" and "labeled with empty string" stays clean.
-    let row: (Uuid, Uuid, String, f64, f64, f64, bool, DateTime<Utc>) = sqlx::query_as(
+    let row: GeofenceTuple = sqlx::query_as(
         r#"
-        INSERT INTO geo.geofences (user_id, label, center, radius_m)
+        INSERT INTO geo.geofences (project_id, user_id, label, center, radius_m)
         VALUES (
+            $6,
             $1,
             NULLIF($2, ''),
             ST_SetSRID(ST_MakePoint($3, $4), 4326),
@@ -52,77 +74,87 @@ pub async fn create(
     .bind(center_lng)
     .bind(center_lat)
     .bind(radius_m)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
-    Ok(GeofenceRow {
-        id: row.0,
-        user_id: row.1,
-        label: row.2,
-        center_lat: row.3,
-        center_lng: row.4,
-        radius_m: row.5,
-        active: row.6,
-        created_at: row.7,
-    })
+    Ok(row.into())
 }
 
 pub async fn list(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     active_only: bool,
 ) -> Result<Vec<GeofenceRow>, sqlx::Error> {
-    let rows: Vec<(Uuid, Uuid, String, f64, f64, f64, bool, DateTime<Utc>)> = sqlx::query_as(
+    let rows: Vec<GeofenceTuple> = sqlx::query_as(
         r#"
         SELECT id, user_id, COALESCE(label, '') AS label,
                ST_Y(center::geometry) AS center_lat,
                ST_X(center::geometry) AS center_lng,
                radius_m, active, created_at
         FROM geo.geofences
-        WHERE user_id = $1
+        WHERE project_id = $3
+          AND user_id = $1
           AND ($2 = FALSE OR active = TRUE)
         ORDER BY created_at DESC
         "#,
     )
     .bind(user_id)
     .bind(active_only)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| GeofenceRow {
-            id: r.0,
-            user_id: r.1,
-            label: r.2,
-            center_lat: r.3,
-            center_lng: r.4,
-            radius_m: r.5,
-            active: r.6,
-            created_at: r.7,
-        })
-        .collect())
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Soft-delete. Returns true if a row was found and deactivated.
-pub async fn deactivate(pool: &PgPool, geofence_id: Uuid) -> Result<bool, sqlx::Error> {
+///
+/// # Scoped by owner, not just by id
+///
+/// This used to be `WHERE id = $1` and nothing else, which made it an
+/// IDOR: a geofence id is a UUID, but ids leak — they are returned by
+/// create, echoed in list responses, and carried in geofence alerts — and
+/// anyone holding one could delete a fence belonging to someone else.
+///
+/// Requiring (project, user, id) means a fence you do not own is
+/// indistinguishable from one that does not exist: the UPDATE matches
+/// nothing and the caller gets `deleted: false` either way. Returning a
+/// distinct "not yours" would confirm the id is real.
+pub async fn deactivate(
+    pool: &PgPool,
+    project_id: Uuid,
+    user_id: Uuid,
+    geofence_id: Uuid,
+) -> Result<bool, sqlx::Error> {
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"
         UPDATE geo.geofences
         SET active = FALSE
         WHERE id = $1
+          AND project_id = $2
+          AND user_id = $3
         RETURNING id
         "#,
     )
     .bind(geofence_id)
+    .bind(project_id)
+    .bind(user_id)
     .fetch_optional(pool)
     .await?;
     Ok(row.is_some())
 }
 
 /// Return the IDs of all active geofences the user is currently inside.
+///
+/// `radius_m` is meters, so both operands cast to `geography` — see the
+/// note on `queries::locations::nearby`. Comparing the raw `GEOMETRY(Point,
+/// 4326)` values would treat `radius_m` as degrees and report every fence
+/// as containing every user.
 pub async fn check_membership(
     pool: &PgPool,
+    project_id: Uuid,
     user_id: Uuid,
     lat: f64,
     lng: f64,
@@ -131,11 +163,12 @@ pub async fn check_membership(
         r#"
         SELECT id
         FROM geo.geofences
-        WHERE user_id = $1
+        WHERE project_id = $4
+          AND user_id = $1
           AND active = TRUE
           AND ST_DWithin(
-              center,
-              ST_SetSRID(ST_MakePoint($2, $3), 4326),
+              center::geography,
+              ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,
               radius_m
           )
         "#,
@@ -143,6 +176,7 @@ pub async fn check_membership(
     .bind(user_id)
     .bind(lng)
     .bind(lat)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())

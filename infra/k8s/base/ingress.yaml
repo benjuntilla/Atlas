@@ -1,0 +1,65 @@
+# Public entry points.
+#
+# Two hosts rather than one with path prefixes, so the data plane and the
+# operator surface can be firewalled, rate-limited, and rotated
+# independently. The control plane in particular has an unauthenticated
+# account-bootstrap route and should usually sit behind an allowlist.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: atlas
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # The SDKs send JSON; nothing here needs a large body. A low cap is
+    # free protection against a trivially cheap memory attack.
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.atlas.dev]
+      secretName: gateway-tls
+  rules:
+    - host: api.atlas.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: control-plane
+  namespace: atlas
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # POST /v1/accounts is unauthenticated and creates a row plus a
+    # credential. The service itself has no rate limit — this is the only
+    # thing standing between it and an abuse script, so it is not
+    # optional. Tighten or add an IP allowlist before exposing publicly.
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [control.atlas.dev]
+      secretName: control-plane-tls
+  rules:
+    - host: control.atlas.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port:
+                  name: http

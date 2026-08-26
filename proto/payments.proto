@@ -6,6 +6,11 @@ option java_multiple_files = true;
 option java_package = "atlas.payments";
 
 service PaymentsService {
+  // Add funds to a wallet from an external payment method. This is the only
+  // way money enters the platform: wallets start at zero and settlement
+  // refuses to move funds a wallet does not hold.
+  rpc Deposit(DepositRequest) returns (DepositResponse);
+
   rpc InitiateTransaction(TransactionRequest) returns (TransactionResponse);
   rpc SettleTransaction(SettleRequest) returns (SettleResponse);
   rpc GetWalletBalance(WalletRequest) returns (WalletResponse);
@@ -17,12 +22,36 @@ service PaymentsService {
   rpc DrainOutbox(DrainOutboxRequest) returns (DrainOutboxResponse);
 }
 
+// `project_id` on every request below is injected by the gateway from the
+// caller's `X-Atlas-Key`, or carried on the Kafka event for the RPCs the
+// fare-consumer calls. It is never client-supplied.
+//
+// It matters most on idempotency_key lookups: the unique index is
+// (project_id, idempotency_key), so a lookup by key alone could match
+// another tenant's transaction and hand it back as a successful
+// idempotent replay.
+message DepositRequest {
+  string user_id         = 1;
+  int64  amount_cents    = 2;
+  string idempotency_key = 3;
+  string project_id      = 4;
+}
+
+message DepositResponse {
+  string transaction_id = 1;
+  string status         = 2;
+  // Wallet balance after the deposit, so the caller does not need a second
+  // round trip to render the result.
+  int64  balance_cents  = 3;
+}
+
 message TransactionRequest {
   string from_user_id   = 1;
   string to_user_id     = 2;
   int64  amount_cents   = 3;
   string idempotency_key = 4;
   string ride_id        = 5;
+  string project_id     = 6;
 }
 
 message TransactionResponse {
@@ -30,13 +59,13 @@ message TransactionResponse {
   string status = 2;
 }
 
-message SettleRequest  { string transaction_id = 1; }
+message SettleRequest  { string transaction_id = 1; string project_id = 2; }
 message SettleResponse { bool success = 1; string status = 2; }
 
-message WalletRequest  { string user_id = 1; }
+message WalletRequest  { string user_id = 1; string project_id = 2; }
 message WalletResponse { int64 balance_cents = 1; string currency = 2; }
 
-message RefundRequest  { string transaction_id = 1; }
+message RefundRequest  { string transaction_id = 1; string project_id = 2; }
 message RefundResponse { bool success = 1; }
 
 message DrainOutboxRequest  { uint32 max_rows = 1; }   // 0 => default 100

@@ -18,6 +18,8 @@ data class EnvConfig(
     val fareTopic: String,
     val outboxPollSeconds: Long,
     val outboxBatchSize: Int,
+    /** Which PaymentProvider to run. "fake" until a real processor is wired. */
+    val paymentProvider: String,
 ) {
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): EnvConfig {
@@ -34,6 +36,7 @@ data class EnvConfig(
                 fareTopic = env["KAFKA_TOPIC_FARE_EVENTS"] ?: "atlas.fare.events",
                 outboxPollSeconds = env["OUTBOX_POLL_SECONDS"]?.toLong() ?: 2,
                 outboxBatchSize = env["OUTBOX_BATCH_SIZE"]?.toInt() ?: 100,
+                paymentProvider = env["PAYMENT_PROVIDER"] ?: "fake",
             )
         }
 

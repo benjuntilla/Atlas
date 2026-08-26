@@ -15,6 +15,12 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class OutboxDispatcherTest {
+
+    // Two tenants, so the scoping can be asserted rather than assumed. A
+    // suite that only ever used one project would pass just as happily
+    // against repositories that ignored projectId entirely.
+    private val projectA: UUID = UUID.fromString("11111111-1111-1111-1111-111111111111")
+    private val projectB: UUID = UUID.fromString("22222222-2222-2222-2222-222222222222")
     private val wallets = InMemoryWalletRepository()
     private val transactions = InMemoryTransactionRepository()
     private val outbox = InMemoryOutbox()
@@ -31,6 +37,7 @@ class OutboxDispatcherTest {
 
     private fun seedOneEvent() {
         service.initiate(
+            projectA,
             UUID.randomUUID().toString(),
             UUID.randomUUID().toString(),
             1500,

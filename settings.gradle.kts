@@ -12,7 +12,7 @@ include("services:auth-service")
 // Phase 4
 include("services:payments-service")
 // Phase 6
-// include("consumers:fare-consumer")
+include("consumers:fare-consumer")
 
 pluginManagement {
     repositories {

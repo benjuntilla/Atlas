@@ -1,0 +1,368 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run obsolete. Cancel it
+# rather than paying for two runs of the same suite.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately no `RUSTFLAGS: -D warnings` here. RUSTFLAGS applies to
+  # dependency crates as well as workspace ones, so a single warning in a
+  # third-party crate would fail the build — sqlx-postgres 0.7 already
+  # emits a future-incompatibility warning that would do exactly that.
+  # `cargo clippy -- -D warnings` below applies only to the workspace
+  # members being linted, and clippy runs the plain rustc lints too, so
+  # unused imports and friends are still hard errors where we control them.
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc is a hard build dependency: every Rust service runs
+      # tonic-build in build.rs, and without it `cargo check` fails before
+      # compiling a single line. cmake is needed separately by rdkafka,
+      # which builds librdkafka from source for geo-engine.
+      - name: Install protobuf compiler and cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler cmake
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Integration tests that need Postgres are #[ignore]d, so this run
+      # covers unit tests only. The `integration` job below runs the rest.
+      - name: Test
+        run: cargo test --workspace
+
+  kotlin:
+    name: Kotlin (auth, payments)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Matches the jvmTarget set in the root build.gradle.kts.
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # No system protoc here on purpose: protobuf-gradle-plugin resolves
+      # the protoc binary from Maven (see gradle/libs.versions.toml), so
+      # the Kotlin build is self-contained.
+      - name: Build and test
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-test-reports
+          path: services/*/build/reports/tests/
+          retention-days: 7
+
+  integration:
+    name: Migrations + DB integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Must match the image in docker-compose.yml — the migrations use
+        # PostGIS types, so plain postgres:15 would fail on 0001.
+        image: postgis/postgis:15-3.3
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas_dev
+          POSTGRES_DB: atlas
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler, cmake, and psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler cmake postgresql-client
+
+      # Before the first cargo invocation: the migration steps below build
+      # the migrator, and an uncached build here would be paid twice.
+      - uses: Swatinem/rust-cache@v2
+
+      # Applied with the same binary production uses, not a psql loop, so
+      # this exercises the migrator itself alongside the SQL.
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: cargo run -p atlas-migrator -- run
+
+      # Re-running must be a no-op. A migration that is not idempotent at
+      # the runner level would break every redeploy, and this is the
+      # cheapest possible place to catch that.
+      - name: Re-apply is a no-op
+        env:
+          DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: |
+          cargo run -p atlas-migrator -- run
+          cargo run -p atlas-migrator -- status
+
+      - name: Verify expected schemas exist
+        env:
+          PGPASSWORD: atlas_dev
+        run: |
+          psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas -c '\dn'
+          for schema in auth geo payments control; do
+            psql -v ON_ERROR_STOP=1 -h localhost -U atlas -d atlas \
+              -tAc "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$schema'" \
+              | grep -q 1 || { echo "schema $schema missing"; exit 1; }
+          done
+
+      # The #[ignore]d sqlx tests hit the database directly at the same URL
+      # docker-compose uses. geo-engine covers the PostGIS queries;
+      # safety-consumer covers geofence transition detection against real
+      # geography maths, which is where a units bug would hide; migrator
+      # covers the tenant-isolation constraints, which only exist in SQL and
+      # so cannot be tested any other way.
+      - name: Run DB-backed integration tests
+        env:
+          ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: |
+          cargo test -p atlas-geo-engine -- --include-ignored
+          cargo test -p atlas-safety-consumer -- --include-ignored
+          cargo test -p atlas-control-plane -- --include-ignored
+          cargo test -p atlas-migrator -- --include-ignored
+          cargo test -p atlas-gateway -- --include-ignored
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # fare-consumer's Exposed adapters skip themselves without this env
+      # var. They cover the custom jsonb column type and the ON CONFLICT
+      # dedup, neither of which any amount of compiling would validate.
+      - name: Run fare-consumer database tests
+        env:
+          ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev@localhost:5432/atlas
+        run: ./gradlew :consumers:fare-consumer:test --no-daemon
+
+      # Placed last on purpose: by now the suites above have written real
+      # rows, so the drill dumps a database with data rather than an empty
+      # schema. An empty database would still catch a broken dump flag,
+      # but not a restore that loses rows.
+      - name: Restore drill
+        env:
+          PGPASSWORD: atlas_dev
+        run: ./scripts/restore-drill.sh postgres://atlas:atlas_dev@localhost:5432/atlas
+
+  compose:
+    name: docker-compose syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Catches YAML errors and bad interpolation in the file every
+      # contributor uses to run the stack locally. Does not build images.
+      - name: Validate compose file
+        run: docker compose config --quiet
+
+  manifests:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSLo kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar xzf kustomize.tar.gz && sudo mv kustomize /usr/local/bin/
+          curl -sSLo kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz && sudo mv kubeconform /usr/local/bin/
+
+      # Building proves the overlays and patches resolve. Validating proves
+      # the API server would actually accept the result — a manifest can
+      # build cleanly and still be rejected for a bad field.
+      - name: Build and validate overlays
+        run: |
+          for overlay in dev prod; do
+            echo "--- $overlay"
+            kustomize build "infra/k8s/overlays/$overlay" > "/tmp/$overlay.yaml"
+            # The second -schema-location covers CRDs: PrometheusRule is not
+            # a core Kubernetes kind, and without it kubeconform -strict
+            # rejects the alert rules as an unknown type. Keeping -strict
+            # matters more than the convenience of -ignore-missing-schemas,
+            # which would also silence typos in the core objects.
+            kubeconform -strict -summary -kubernetes-version 1.29.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              "/tmp/$overlay.yaml"
+          done
+
+      # An alert on a metric nothing emits never fires, and never fires
+      # silently — you find out during the incident it was meant to catch.
+      # The YAML looks equally correct either way, so this cannot be caught
+      # by review.
+      - name: Alert rules must reference real metrics
+        run: python3 scripts/check-alert-metrics.py
+
+      # A spec that has drifted is worse than no spec: people trust it and
+      # generate clients from it. Drift is also invisible at review time —
+      # nothing in a router diff reminds you that docs/openapi.yaml
+      # describes the same surface.
+      # An SDK that silently lags the API looks finished, so nobody
+      # notices the missing endpoint until a user reaches for a raw HTTP
+      # client instead.
+      - name: Every SDK must cover the gateway surface
+        run: python3 scripts/check-sdk-coverage.py
+
+      - name: OpenAPI spec must match the router
+        run: |
+          pip install --quiet openapi-spec-validator
+          python3 scripts/check-openapi-routes.py
+          python3 -c "
+          from openapi_spec_validator import validate
+          import yaml
+          validate(yaml.safe_load(open('docs/openapi.yaml')))
+          print('openapi spec is valid')
+          "
+
+      # The secret template holds placeholder values. If it ever ends up in
+      # the kustomization, `kubectl apply` would create a Secret whose
+      # contents are the literal string REPLACE_ME, and services would fail
+      # to authenticate against Postgres in a very confusing way.
+      - name: Secret template must not be applied
+        run: |
+          for overlay in dev prod; do
+            if grep -q "REPLACE_ME" "/tmp/$overlay.yaml"; then
+              echo "secrets.example.yaml leaked into the $overlay build"
+              exit 1
+            fi
+          done
+
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Fails only on advisories against crates this build actually
+      # compiles. `cargo audit` alone reads Cargo.lock, which lists
+      # optional dependencies no feature ever builds — on this repo that
+      # was five of eight findings, including one rated 7.5 high. A
+      # security check that mostly reports non-exposure is one people
+      # learn to skip.
+      - name: Audit compiled dependencies
+        run: ./scripts/check-dependencies.sh
+
+  dart-sdk:
+    name: Dart SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        working-directory: sdks/dart
+        run: dart pub get
+
+      - name: Analyze
+        working-directory: sdks/dart
+        run: dart analyze --fatal-infos
+
+      - name: Format
+        working-directory: sdks/dart
+        run: dart format --output=none --set-exit-if-changed .
+
+      # Bind a real server on a real port rather than mocking the
+      # transport, so headers, retries and JSON handling are exercised the
+      # way they run.
+      - name: Test
+        working-directory: sdks/dart
+        run: dart test
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Format
+        run: terraform -chdir=infra/terraform fmt -check -diff
+
+      # -backend=false so no GCS bucket or credentials are needed; this
+      # still downloads the provider, which is what `validate` needs to
+      # check resource and attribute names rather than just HCL syntax.
+      - name: Init
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+
+      - name: Validate
+        run: terraform -chdir=infra/terraform validate
+
+  sdk-typescript:
+    name: SDK (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Built and tested on the OLDEST version the package claims to
+          # support, not the newest. The floor is 20.3 because the
+          # transport uses AbortSignal.any (20.3+) and globalThis.crypto
+          # (19+); testing only on latest would have hidden that.
+          node-version: "20.3"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # Builds with strict TypeScript, then runs the suite against a real
+      # local HTTP server.
+      - name: Test
+        run: npm test

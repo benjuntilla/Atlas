@@ -1,7 +1,10 @@
 package io.atlas.payments.http
 
+import io.atlas.payments.core.PaymentProvider
+import io.atlas.payments.core.OutboxBackend
 import io.atlas.payments.core.PaymentsMetrics
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.engine.embeddedServer
@@ -29,7 +32,11 @@ private val LOG = LoggerFactory.getLogger("io.atlas.payments.http.HttpServer")
  *   GET  /healthz            liveness ping
  *   POST /webhooks/{provider} async provider callbacks (acknowledged, logged)
  */
-fun startHttpServer(port: Int, registry: PrometheusMeterRegistry): NettyApplicationEngine =
+fun startHttpServer(
+    port: Int,
+    registry: PrometheusMeterRegistry,
+    provider: PaymentProvider,
+): NettyApplicationEngine =
     embeddedServer(Netty, port = port) {
         routing {
             get("/metrics") {
@@ -39,31 +46,121 @@ fun startHttpServer(port: Int, registry: PrometheusMeterRegistry): NettyApplicat
                 call.respondText("ok")
             }
             post("/webhooks/{provider}") {
-                val provider = call.parameters["provider"] ?: "unknown"
+                val source = call.parameters["provider"] ?: "unknown"
+
+                // Bounded before reading. This endpoint is unauthenticated
+                // by nature — the signature is checked after the body is
+                // in hand, because the signature covers the body — so an
+                // unbounded read here is a way for anyone on the internet
+                // to make the service allocate as much memory as they
+                // like. Provider events are a few kilobytes; 1MB is
+                // generous.
+                val declared = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                if (declared != null && declared > MAX_WEBHOOK_BYTES) {
+                    LOG.warn("rejected oversized webhook from provider={} bytes={}", source, declared)
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
                 val body = call.receiveText()
-                // Phase 4 uses the FakePaymentProvider, which never calls back.
-                // Real providers (Stripe et al.) would verify a signature and
-                // reconcile the referenced charge here. We acknowledge so the
-                // provider does not retry, and log for observability.
-                LOG.info("received webhook from provider={} bytes={}", provider, body.length)
+                if (body.length > MAX_WEBHOOK_BYTES) {
+                    // A chunked request declares no length, so the cap is
+                    // enforced again on what actually arrived.
+                    LOG.warn("rejected oversized webhook from provider={}", source)
+                    call.respond(HttpStatusCode.PayloadTooLarge)
+                    return@post
+                }
+
+                // Verify BEFORE doing anything with the payload. This
+                // endpoint is an unauthenticated write path from the public
+                // internet into a payments system; the only thing making it
+                // safe is that the provider signed the request.
+                //
+                // The check runs even though FakePaymentProvider accepts
+                // everything, so the call site exists and cannot be
+                // forgotten when a real provider is wired in. Verification
+                // is provider-specific, which is why it lives on the
+                // PaymentProvider interface rather than here.
+                val signature = call.request.headers["Stripe-Signature"]
+                    ?: call.request.headers["X-Webhook-Signature"]
+                if (!provider.verifyWebhook(body, signature)) {
+                    LOG.warn("rejected webhook from provider={}: bad signature", source)
+                    call.respond(HttpStatusCode.Unauthorized)
+                    return@post
+                }
+
+                // Acknowledged and logged. Reconciling the referenced charge
+                // against payments.transactions is the next step and needs a
+                // real provider's event schema to be worth writing.
+                LOG.info("accepted webhook from provider={} bytes={}", source, body.length)
                 call.respond(HttpStatusCode.OK)
             }
         }
     }.start(wait = false)
+
+/**
+ * Largest webhook body accepted. Provider events run to a few kilobytes.
+ */
+private const val MAX_WEBHOOK_BYTES = 1_000_000
 
 /** Creates the Prometheus registry App.kt shares with the HTTP server and metrics. */
 fun newPrometheusRegistry(): PrometheusMeterRegistry =
     PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
 
 /** Micrometer-backed [PaymentsMetrics] exposed via /metrics. */
+/**
+ * Register outbox depth as GAUGES fed by a supplier.
+ *
+ * Gauges rather than counters because the question is "how much is stuck
+ * right now", and Micrometer polls the supplier at scrape time so the
+ * value is never stale.
+ *
+ * This is the signal payments actually needs. `outbox_dispatched_total`
+ * is a counter of SUCCESSES: when Kafka is unreachable it simply stops
+ * increasing, and a counter that stops looks exactly like a system with
+ * nothing to do. Depth goes UP when the drain is stuck, which is a
+ * statement rather than an absence.
+ *
+ * Two series, because they answer different questions: row count says how
+ * much is waiting, and the age of the oldest row distinguishes "busy"
+ * from "wedged" — a large backlog that is draining has a young head.
+ */
+fun registerOutboxGauges(registry: MeterRegistry, backend: OutboxBackend) {
+    registry.gauge("atlas_payments_outbox_pending_rows", backend) {
+        it.pending().rows.toDouble()
+    }
+    registry.gauge("atlas_payments_outbox_oldest_age_seconds", backend) {
+        it.pending().oldestAgeSeconds.toDouble()
+    }
+}
+
 class MicrometerPaymentsMetrics(registry: MeterRegistry) : PaymentsMetrics {
     private val initiated = registry.counter("atlas_payments_transactions_initiated_total")
+    private val reconciledSettled =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "settled")
+    private val reconciledFailed =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "failed")
+    // The one worth alerting on: money whose fate nobody knows.
+    private val reconciledUnresolved =
+        registry.counter("atlas_payments_reconciled_total", "outcome", "unresolved")
     private val settled = registry.counter("atlas_payments_transactions_settled_total")
     private val refunded = registry.counter("atlas_payments_transactions_refunded_total")
     private val dispatched = registry.counter("atlas_payments_outbox_dispatched_total")
+    private val depositOk = registry.counter("atlas_payments_deposits_total", "outcome", "settled")
+    private val depositFail = registry.counter("atlas_payments_deposits_total", "outcome", "failed")
 
     override fun transactionInitiated() = initiated.increment()
     override fun transactionSettled() = settled.increment()
     override fun transactionRefunded() = refunded.increment()
+    override fun reconciled(settled: Int, failed: Int, unresolved: Int) {
+        if (settled > 0) reconciledSettled.increment(settled.toDouble())
+        if (failed > 0) reconciledFailed.increment(failed.toDouble())
+        // Always recorded, including zero, so the series exists before
+        // anything goes wrong. An alert on a metric that only appears
+        // during an incident cannot fire during the incident.
+        reconciledUnresolved.increment(unresolved.toDouble())
+    }
+
     override fun outboxDispatched(count: Int) = dispatched.increment(count.toDouble())
+    override fun depositSettled() = depositOk.increment()
+    override fun depositFailed() = depositFail.increment()
 }

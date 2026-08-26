@@ -1,5 +1,7 @@
 package io.atlas.payments.grpc
 
+import atlas.payments.DepositRequest
+import atlas.payments.DepositResponse
 import atlas.payments.DrainOutboxRequest
 import atlas.payments.DrainOutboxResponse
 import atlas.payments.PaymentsServiceGrpcKt
@@ -29,9 +31,28 @@ class PaymentsGrpcService(
     private val dispatcher: OutboxDispatcher,
 ) : PaymentsServiceGrpcKt.PaymentsServiceCoroutineImplBase() {
 
+    override suspend fun deposit(request: DepositRequest): DepositResponse {
+        val result = try {
+            payments.deposit(
+                projectId = request.projectId.toProjectId(),
+                userId = request.userId,
+                amountCents = request.amountCents,
+                idempotencyKey = request.idempotencyKey,
+            )
+        } catch (e: PaymentError) {
+            throw e.toGrpcStatusException()
+        }
+        return DepositResponse.newBuilder()
+            .setTransactionId(result.transactionId.toString())
+            .setStatus(result.status)
+            .setBalanceCents(result.balanceCents)
+            .build()
+    }
+
     override suspend fun initiateTransaction(request: TransactionRequest): TransactionResponse {
         val result = try {
             payments.initiate(
+                projectId = request.projectId.toProjectId(),
                 fromUserId = request.fromUserId,
                 toUserId = request.toUserId,
                 amountCents = request.amountCents,
@@ -49,7 +70,7 @@ class PaymentsGrpcService(
 
     override suspend fun settleTransaction(request: SettleRequest): SettleResponse {
         val result = try {
-            payments.settle(request.transactionId)
+            payments.settle(request.projectId.toProjectId(), request.transactionId)
         } catch (e: PaymentError) {
             throw e.toGrpcStatusException()
         }
@@ -61,7 +82,7 @@ class PaymentsGrpcService(
 
     override suspend fun getWalletBalance(request: WalletRequest): WalletResponse {
         val balance = try {
-            payments.walletBalance(request.userId)
+            payments.walletBalance(request.projectId.toProjectId(), request.userId)
         } catch (e: PaymentError) {
             throw e.toGrpcStatusException()
         }
@@ -73,7 +94,7 @@ class PaymentsGrpcService(
 
     override suspend fun refundTransaction(request: RefundRequest): RefundResponse {
         val result = try {
-            payments.refund(request.transactionId)
+            payments.refund(request.projectId.toProjectId(), request.transactionId)
         } catch (e: PaymentError) {
             throw e.toGrpcStatusException()
         }
@@ -95,6 +116,12 @@ class PaymentsGrpcService(
 }
 
 private fun PaymentError.toGrpcStatusException(): StatusException = when (this) {
+    // The caller named a user that is not theirs. FAILED_PRECONDITION, not
+    // INVALID_ARGUMENT: the id is well-formed, it just does not describe
+    // anyone they can pay.
+    is PaymentError.UnknownUser ->
+        Status.FAILED_PRECONDITION.withDescription(message).asException()
+
     is PaymentError.InvalidAmount -> Status.INVALID_ARGUMENT.withDescription(message).asException()
     is PaymentError.InvalidArgument -> Status.INVALID_ARGUMENT.withDescription(message).asException()
     is PaymentError.TransactionNotFound -> Status.NOT_FOUND.withDescription(message).asException()
@@ -102,4 +129,28 @@ private fun PaymentError.toGrpcStatusException(): StatusException = when (this) 
     is PaymentError.InsufficientFunds -> Status.FAILED_PRECONDITION.withDescription(message).asException()
     is PaymentError.InvalidState -> Status.FAILED_PRECONDITION.withDescription(message).asException()
     is PaymentError.ProviderDeclined -> Status.FAILED_PRECONDITION.withDescription(message).asException()
+}
+
+/**
+ * Parse the project the caller injected — the gateway for the RPCs it
+ * routes, the fare-consumer (from the Kafka event) for settle and refund.
+ *
+ * Strict: an empty value cannot have come from a client, since no REST DTO
+ * has the field. It can only mean a bug on the trusted side, and this is
+ * the money path — defaulting would turn that bug into a charge against
+ * the wrong tenant.
+ */
+private fun String.toProjectId(): java.util.UUID {
+    if (isEmpty()) {
+        throw io.grpc.Status.INVALID_ARGUMENT
+            .withDescription("project_id is required; the caller must supply it")
+            .asException()
+    }
+    return try {
+        java.util.UUID.fromString(this)
+    } catch (e: IllegalArgumentException) {
+        throw io.grpc.Status.INVALID_ARGUMENT
+            .withDescription("project_id is not a UUID")
+            .asException()
+    }
 }

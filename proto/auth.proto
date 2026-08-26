@@ -15,11 +15,40 @@ service AuthService {
 
   rpc ValidateToken(ValidateTokenRequest) returns (TokenClaims);
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeResponse);
+
+  // Password reset and email verification. Both are two steps: ask for a
+  // token by email, then redeem it.
+  //
+  // The Request* calls return nothing and succeed whether or not the
+  // address exists. An endpoint that answered "no such user" would be an
+  // account enumeration oracle, and the addresses it confirmed would be
+  // exactly the ones worth attacking.
+  rpc RequestPasswordReset(RequestPasswordResetRequest) returns (RequestPasswordResetResponse);
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+  rpc RequestEmailVerification(RequestEmailVerificationRequest) returns (RequestEmailVerificationResponse);
+  rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
+
+  // Current state of one user.
+  //
+  // Separate from ValidateToken because the two answer different
+  // questions with different lifetimes. Token claims are FIXED at issue
+  // and cached for 30s; a user's profile CHANGES while a token is live —
+  // verifying an address is exactly such a change. Folding the profile
+  // into the cached claims would serve a stale "unverified" for the rest
+  // of the TTL to the user who just clicked the link.
+  rpc GetUser(GetUserRequest) returns (UserProfile);
 }
 
+// `project_id` on the messages below is injected by the gateway from the
+// caller's `X-Atlas-Key`, exactly as `user_id` is injected from the JWT.
+// The REST DTOs have no field for it, so a client cannot name a project —
+// it can only present a key that names one. A backend receiving an empty
+// project_id rejects the call rather than guessing, because the only way
+// to get here without one is a bug on the trusted side of the boundary.
 message RegisterRequest {
   string email = 1;
   string password = 2;
+  string project_id = 3;
 }
 
 message RegisterResponse {
@@ -32,12 +61,14 @@ message AuthRequest {
   // Optional location hint stamped into JWT claims on successful auth.
   double lat = 3;
   double lng = 4;
+  string project_id = 5;
 }
 
 message IssueTokenRequest {
   string user_id = 1;
   double lat = 2;
   double lng = 3;
+  string project_id = 4;
 }
 
 message TokenResponse {
@@ -51,12 +82,73 @@ message ValidateTokenRequest {
 
 message TokenClaims {
   string user_id = 1;
+  // Note: verification state is NOT a token claim. It changes while a
+  // token is live, and a claim minted before verification would keep
+  // saying "unverified" for the rest of the session.
+
   double last_lat = 2;
   double last_lng = 3;
   int64 issued_at = 4;
   int64 expires_at = 5;
   string session_id = 6;
+  // The project the user belongs to, signed into the token at issue time.
+  // The gateway compares this against the project its key resolved to, so
+  // a token minted in one project cannot be replayed against another.
+  string project_id = 7;
 }
 
 message RevokeTokenRequest { string token = 1; }
 message RevokeResponse     { bool success = 1; }
+
+// --- Password reset / email verification ------------------------------------
+
+message RequestPasswordResetRequest {
+  string email = 1;
+  string project_id = 2;
+}
+
+// Deliberately empty. Any field here — "sent", "user_exists", a count —
+// would leak whether the address is registered.
+message RequestPasswordResetResponse {}
+
+message ResetPasswordRequest {
+  // The token from the email. It names its own project, so unlike every
+  // other call on this service there is no project_id to inject: the
+  // person redeeming it clicked a link and has no idea what a project is.
+  string token = 1;
+  string new_password = 2;
+}
+
+message ResetPasswordResponse {
+  string user_id = 1;
+}
+
+message RequestEmailVerificationRequest {
+  string email = 1;
+  string project_id = 2;
+}
+
+message RequestEmailVerificationResponse {}
+
+message VerifyEmailRequest {
+  string token = 1;
+}
+
+message VerifyEmailResponse {
+  string user_id = 1;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+  string project_id = 2;
+}
+
+message UserProfile {
+  string user_id = 1;
+  string email = 2;
+  int64  created_at = 3;
+  // Unix seconds, or 0 for an unverified address. proto3 has no optional
+  // scalars, and 0 is unambiguous here: no address was ever confirmed at
+  // the epoch.
+  int64  email_verified_at = 4;
+}

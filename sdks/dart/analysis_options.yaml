@@ -1,0 +1,9 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  errors:
+    # An SDK's public surface is its documentation.
+    public_member_api_docs: ignore

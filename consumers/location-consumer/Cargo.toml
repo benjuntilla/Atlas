@@ -1,0 +1,28 @@
+[package]
+name = "atlas-location-consumer"
+version = "0.1.0"
+edition = "2021"
+description = "Consumes atlas.location.updates and enforces the geo.locations retention window."
+license = "MIT"
+
+[[bin]]
+name = "atlas-location-consumer"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }
+rdkafka = { workspace = true }
+prost = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+
+[build-dependencies]
+# prost-build rather than tonic-build: this crate decodes Kafka payloads
+# and never speaks gRPC, so it has no use for service stubs.
+prost-build = { workspace = true }

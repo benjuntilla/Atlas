@@ -69,12 +69,20 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let format = if cli.json { Format::Json } else { Format::Human };
+    let format = if cli.json {
+        Format::Json
+    } else {
+        Format::Human
+    };
 
     let result: Result<()> = match cli.command {
         Command::Validate => commands::validate::run(&cli.config, format),
-        Command::Deploy => commands::deploy::run(&cli.config, format, !cli.live, cli.base_url).await,
-        Command::Status => commands::status::run(&cli.config, format, !cli.live, cli.base_url).await,
+        Command::Deploy => {
+            commands::deploy::run(&cli.config, format, !cli.live, cli.base_url).await
+        }
+        Command::Status => {
+            commands::status::run(&cli.config, format, !cli.live, cli.base_url).await
+        }
         Command::Logs { service } => {
             commands::logs::run(&cli.config, service, format, !cli.live, cli.base_url).await
         }
@@ -91,7 +99,10 @@ async fn main() -> ExitCode {
                     "ok": false,
                     "error": err.to_string(),
                 });
-                eprintln!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
             } else {
                 eprintln!("{} {}", "error:".red().bold(), err);
                 // Walk the error chain so the user sees the root cause.

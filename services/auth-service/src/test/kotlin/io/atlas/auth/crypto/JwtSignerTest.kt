@@ -8,6 +8,7 @@ import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class JwtSignerTest {
 
@@ -20,6 +21,7 @@ class JwtSignerTest {
         lastLat: Double? = 33.4484,
         lastLng: Double? = -112.0740,
     ) = TokenClaims(
+        projectId = UUID.fromString("33333333-3333-3333-3333-333333333333"),
         userId = UUID.randomUUID(),
         sessionId = UUID.randomUUID(),
         issuedAt = issuedAt,
@@ -79,5 +81,38 @@ class JwtSignerTest {
     fun `verify rejects garbage`() {
         assertFailsWith<AuthError.TokenInvalid> { signer.verify("not a jwt") }
         assertFailsWith<AuthError.TokenInvalid> { signer.verify("") }
+    }
+
+    /**
+     * A token minted before multi-tenancy has no project claim. Honouring
+     * one would mean guessing which tenant its bearer belongs to, and there
+     * is no safe guess — so verification must refuse it outright rather
+     * than defaulting.
+     */
+    @Test
+    fun `a token without a project claim is rejected`() {
+        val now = Instant.now()
+        // Hand-built to omit the claim, since `sign` always writes it.
+        val jwt = org.jose4j.jwt.JwtClaims().apply {
+            subject = UUID.randomUUID().toString()
+            issuedAt = org.jose4j.jwt.NumericDate.fromSeconds(now.epochSecond)
+            expirationTime = org.jose4j.jwt.NumericDate.fromSeconds(now.epochSecond + 3600)
+            setClaim(Jose4jJwtSigner.CLAIM_SESSION_ID, UUID.randomUUID().toString())
+        }
+        val jws = org.jose4j.jws.JsonWebSignature().apply {
+            payload = jwt.toJson()
+            key = org.jose4j.keys.HmacKey(secret.toByteArray(Charsets.UTF_8))
+            algorithmHeaderValue = org.jose4j.jws.AlgorithmIdentifiers.HMAC_SHA256
+        }
+
+        val e = assertFailsWith<AuthError.TokenInvalid> { signer.verify(jws.compactSerialization) }
+        assertTrue(e.message!!.contains(Jose4jJwtSigner.CLAIM_PROJECT_ID))
+    }
+
+    @Test
+    fun `the project claim survives a sign-verify round trip`() {
+        val projectId = UUID.randomUUID()
+        val claims = claimsFixture().copy(projectId = projectId)
+        assertEquals(projectId, signer.verify(signer.sign(claims)).projectId)
     }
 }

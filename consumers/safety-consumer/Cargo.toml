@@ -1,0 +1,27 @@
+[package]
+name = "atlas-safety-consumer"
+version = "0.1.0"
+edition = "2021"
+description = "Turns location updates into geofence entry/exit alerts on atlas.safety.alerts."
+license = "MIT"
+
+[[bin]]
+name = "atlas-safety-consumer"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }
+rdkafka = { workspace = true }
+prost = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }

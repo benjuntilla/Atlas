@@ -15,6 +15,7 @@ import org.jetbrains.exposed.sql.javatime.timestamp
 
 object Wallets : Table("payments.wallets") {
     val id = uuid("id").autoGenerate()
+    val projectId = uuid("project_id")
     val userId = uuid("user_id").uniqueIndex()
     val balanceCents = long("balance_cents")
     val currency = text("currency")
@@ -25,18 +26,29 @@ object Wallets : Table("payments.wallets") {
 
 object Transactions : Table("payments.transactions") {
     val id = uuid("id").autoGenerate()
+    val projectId = uuid("project_id")
     val fromWallet = uuid("from_wallet").nullable()
     val toWallet = uuid("to_wallet").nullable()
     val amountCents = long("amount_cents")
     val status = text("status")
-    val idempotencyKey = text("idempotency_key").uniqueIndex()
+    val idempotencyKey = text("idempotency_key")
     val rideId = uuid("ride_id").nullable()
     val createdAt = timestamp("created_at")
     val settledAt = timestamp("settled_at").nullable()
     val providerRef = text("provider_ref").nullable()
     val idempotencyArgsHash = text("idempotency_args_hash").nullable()
+    val kind = text("kind")
 
     override val primaryKey = PrimaryKey(id)
+
+    // Matches `transactions_project_idempotency_key` from migration 0050.
+    // Declaring `idempotency_key` unique on its own was right when there
+    // was one tenant and is wrong now in the way that matters: two
+    // customers both using "order-1" is normal, and the old shape says it
+    // is a conflict.
+    init {
+        uniqueIndex(projectId, idempotencyKey)
+    }
 }
 
 object Outbox : Table("payments.outbox") {
