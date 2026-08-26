@@ -38,13 +38,22 @@ In active development. The repository currently contains:
 * **Kubernetes manifests** for the whole platform — Deployments, HPAs, PDBs, NetworkPolicies, Ingress — validated in CI against real API schemas
 * **Container images** for all nine workloads, built and pushed to GHCR on every push
 * **Terraform** for GCP: VPC, GKE with Dataplane V2, private Cloud SQL with PostGIS, Secret Manager, Workload Identity
-* A **TypeScript SDK** (`sdks/typescript`) with zero runtime dependencies, covering the whole gateway surface
-
+* **Three SDKs** — TypeScript, Rust and Dart (`sdks/`) — covering the same
+  gateway surface, with a CI check that fails if any of them lags it
 * **Multi-tenancy** across the whole data plane: project-scoped users,
   locations, geofences, wallets and transactions, with the boundary
   enforced in SQL where it can be
+* **Password reset and email verification**, single-use and rate-limited,
+  behind an `EmailSender` port with no provider wired
+* **JWT signing key rotation**, so a suspected leak does not mean logging
+  every user out at once
+* **An OpenAPI description**, a restore drill, Prometheus alert rules, and
+  a dependency scan — each with a CI check that fails when it drifts
 
-Still to come: the Dart and Rust SDKs.
+The one thing deliberately unfinished is the payment processor: the
+`PaymentProvider` seam and everything around it is built and tested, but
+no real processor is wired in. See **Payments** below for what that needs
+and why it is a business decision before it is an engineering one.
 
 ### Database migrations
 
@@ -341,10 +350,34 @@ setting `PAYMENT_PROVIDER`. Nothing above the interface changes. An unknown
 value fails at startup rather than silently falling back to the fake, which
 in production would approve charges against money never collected.
 
-**Do not point this at real money until** a provider is implemented, the
-webhook handler reconciles against `payments.transactions`, and a sweep
-exists for deposits left pending by a crash between capture and credit
-(migration 0033 indexes exactly those rows).
+The sweep for transactions left pending by a crash between capture and
+credit now exists and runs on a timer — see **Reconciliation, webhooks,
+and retries** above.
+
+**Before pointing this at real money**, two things are outstanding, and
+only one of them is code.
+
+*The code:* implement `PaymentProvider` against a real processor —
+`authorize`, `capture`, `refund`, `lookup`, `verifyWebhook` — and have the
+webhook handler act on the events it verifies rather than only logging
+them. That is a contained piece of work; everything it plugs into is
+built.
+
+*The decision:* who holds the money. `payments.wallets` stores balances
+and transfers move them between users, which is close to the textbook
+definition of money transmission — a licensed activity in most
+jurisdictions, and true today regardless of which processor is wired in.
+The usual ways to stay outside it are a platform product where the
+processor and its bank partners hold the licence and the funds (Stripe
+Connect, Adyen for Platforms), or an agent-of-payee structure where Atlas
+never takes custody.
+
+This is why `WITHDRAWAL` appears in the transaction-kind constraint and is
+not implemented. Money can currently enter and move but never leave, which
+is the only reason the question has not yet been forced. **Implementing
+payouts is the point at which it must be answered** — the structure
+determines whether user-held balances are viable at all, so it is worth
+settling before that endpoint is written rather than after.
 
 Four RPCs are deliberately unrouted: `auth.IssueToken` and
 `payments.DrainOutbox` (both marked internal in their `.proto`), plus
@@ -365,7 +398,7 @@ through Kafka. Each topic has exactly one producer.
 | `atlas.safety.alerts` | safety-consumer | *(developer's app)* | Geofence entry/exit, for the app to act on |
 | `atlas.fare.events` | payments (outbox) | fare-consumer | Settles on `RIDE_COMPLETED`, refunds on `RIDE_CANCELLED` |
 | `atlas.auth.tokens` | auth-service | auth-service | Cache invalidation fanout on revocation |
-| `atlas.elo.recompute` | — | — | Not yet wired; see below |
+| `atlas.elo.recompute` | — | — | Unused; safety scores are computed at read time |
 
 Three things are worth knowing about this table.
 
