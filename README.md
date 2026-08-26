@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/cal-fund-wordmark-white.svg">
+    <img alt="cal.fund" src=".github/assets/cal-fund-wordmark-black.svg" width="360">
+  </picture>
+</p>
+
 # Atlas
 
 **Atlas is a developer platform for building location-aware, real-time, transactional apps.** Drop it into a mobility project and you get auth, geospatial queries, payments, and an event bus without configuring any of it yourself.
